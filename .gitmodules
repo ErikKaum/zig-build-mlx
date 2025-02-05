@@ -4,3 +4,6 @@
 [submodule "doctest"]
 	path = doctest
 	url = git@github.com:doctest/doctest.git
+[submodule "fmt"]
+	path = fmt
+	url = git@github.com:fmtlib/fmt.git
