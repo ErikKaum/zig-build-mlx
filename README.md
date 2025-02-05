@@ -56,5 +56,5 @@ exe.linkLibrary(mlx.artifact("mlx"));
 and then import it in your zig project like so:
 
 
-# Acknowledgements
+## Acknowledgements
 This structure is inspired and follows a lot of zig builds made by @mitchellh. For example [zig-build.libxml2](https://github.com/mitchellh/zig-build-libxml2/tree/main) or [zig-build-zlib](https://github.com/mitchellh/zig-build-zlib)
