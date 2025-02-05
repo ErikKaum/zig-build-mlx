@@ -14,18 +14,18 @@ In the chart this repo is the leftmost in the lower flow. So it's not strickly f
 ## Supported features
 
 - [x] CPU tests
-- [] Metal tests
-- [] Examaples
-- [] Benchmarks
-- [] Python bindings
-- [] Metal
+- [ ] Metal tests
+- [ ] Examaples
+- [ ] Benchmarks
+- [ ] Python bindings
+- [ ] Metal
 - [x] Build CPU
-- [] Metal debug
-- [] Enable x68 Mac
-- [] GGUF
-- [] Safetensors
-– [] Metal JIT
-- [] Shared libs
+- [ ] Metal debug
+- [ ] Enable x68 Mac
+- [ ] GGUF
+- [ ] Safetensors
+– [ ] Metal JIT
+- [ ] Shared libs
 
 Besides these there are a bunch of TODOs in the `build.zig` file to double check that we're actually porting the functionality from CMake correctly.
 
