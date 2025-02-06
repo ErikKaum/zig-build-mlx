@@ -24,7 +24,7 @@ In the chart this repo is the leftmost in the lower flow. So it's not strickly f
 - [ ] Enable x68 Mac
 - [ ] GGUF
 - [ ] Safetensors
-– [ ] Metal JIT
+- [ ] Metal JIT
 - [ ] Shared libs
 
 Besides these there are a bunch of TODOs in the `build.zig` file to double check that we're actually porting the functionality from CMake correctly.

@@ -662,8 +662,9 @@ const CompiledPreambleBuilder = struct {
         self.step.dependOn(&cmd.step);
     }
 
+    // TODO fix the hardcoded install_prefix
     fn getOutputPath(self: *const CompiledPreambleBuilder) []const u8 {
-        return self.b.pathJoin(&.{ self.b.install_prefix, "include", "mlx", "backend", "common", "compiled_preamble.cpp" });
+        return self.b.pathJoin(&.{ "zig-out", "include", "mlx", "backend", "common", "compiled_preamble.cpp" });
     }
 };
 
