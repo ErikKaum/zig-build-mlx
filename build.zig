@@ -119,15 +119,7 @@ pub fn build(b: *std.Build) !void {
         });
     }
 
-    // TODO improve this, it's a bit flaky imo
-    const preamble_builder = try CompiledPreambleBuilder.init(b, target);
-    try preamble_builder.build();
-
-    lib.addCSourceFile(.{
-        .file = b.path(preamble_builder.getOutputPath()),
-        .flags = &CPP_FLAGS,
-    });
-    lib.step.dependOn(preamble_builder.step);
+    try build_preamble(b, lib);
 
     // should these be done earlier maybe?
     const is_darwin = target.result.isDarwin();
@@ -599,6 +591,52 @@ const Dependencies = struct {
 /// Build Preamble
 ///////////////////////////////////////
 
+fn build_preamble(b: *std.Build, lib: *std.Build.Step.Compile) !void {
+    const wf = b.addWriteFiles();
+    const root = std.fs.path.dirname(@src().file) orelse ".";
+    const script_path = b.pathJoin(&.{ root, "mlx", "mlx", "backend", "common", "make_compiled_preamble.sh" });
+
+    // This is kinda hacky, better would be to have the contents of the file ready here and then just write it
+    const generated_cpp = wf.add("mlx/backend/common/compiled_preamble.cpp", "");
+    const dir_path = generated_cpp.dirname();
+
+    ////////////
+    const print_step = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "-c",
+        "echo 'Generated preamble path:' $(realpath $1)",
+        "--",
+    });
+    print_step.addFileArg(generated_cpp);
+    ////////////
+
+    const cmd = b.addSystemCommand(&[_][]const u8{
+        "/bin/bash",
+        script_path,
+    });
+
+    cmd.addFileArg(generated_cpp);
+
+    cmd.addArgs(&[_][]const u8{
+        "clang",
+        "mlx",
+        "TRUE",
+    });
+
+    cmd.step.dependOn(&wf.step);
+
+    lib.addIncludePath(dir_path);
+    lib.addCSourceFile(.{ .file = generated_cpp, .flags = &CPP_FLAGS });
+
+    lib.step.dependOn(&wf.step);
+    lib.step.dependOn(&cmd.step);
+
+    ///////
+    const print_option = b.step("print-preamble", "Print the location of the generated preamble file");
+    print_option.dependOn(&print_step.step);
+    b.getInstallStep().dependOn(&print_step.step);
+}
+
 const CompiledPreambleBuilder = struct {
     b: *std.Build,
     compiler: []const u8,
@@ -626,40 +664,55 @@ const CompiledPreambleBuilder = struct {
         };
     }
 
-    fn build(self: *const CompiledPreambleBuilder) !void {
-        const script_path = self.b.pathJoin(&.{ self.root, "mlx", "mlx", "backend", "common", "make_compiled_preamble.sh" });
-        const output_path = self.b.pathJoin(&.{ self.b.install_prefix, "include", "mlx", "backend", "common", "compiled_preamble.cpp" });
+    fn build(self: *const CompiledPreambleBuilder, lib: *std.Build.Step.Compile) !void {
+        const wf = self.b.addWriteFiles();
+        const generated_cpp = wf.add("mlx/backend/common/compiled_preamble.cpp",
+            \\#include <iostream>
+            \\    std::cout << "Hello from generated C++ file!" << std::endl;
+            \\    return 0;
+            \\}
+        );
 
-        const dirname = std.fs.path.dirname(output_path) orelse return error.NoParentDir;
-        try std.fs.cwd().makePath(dirname);
+        const cpp_path = generated_cpp.dirname();
 
-        std.fs.cwd().deleteFile(output_path) catch {};
-        const file = try std.fs.cwd().createFile(output_path, .{});
-        file.close();
+        lib.addIncludePath(cpp_path);
+        lib.addCSourceFile(.{ .file = generated_cpp });
 
-        const cmd = self.b.addSystemCommand(&[_][]const u8{
-            "/bin/bash",
-            script_path,
-            output_path,
-            "clang",
-            "mlx",
-            "TRUE",
-        });
+        lib.step.dependOn(&wf.step);
 
-        const dependencies = [_][]const u8{
-            "mlx/mlx/backend/common/compiled_preamble.h",
-            "mlx/mlx/types/half_types.h",
-            "mlx/mlx/types/fp16.h",
-            "mlx/mlx/types/bf16.h",
-            "mlx/mlx/types/complex.h",
-            "mlx/mlx/backend/common/ops.h",
-        };
+        // const script_path = self.b.pathJoin(&.{ self.root, "mlx", "mlx", "backend", "common", "make_compiled_preamble.sh" });
+        // const output_path = self.b.pathJoin(&.{ self.b.install_prefix, "include", "mlx", "backend", "common", "compiled_preamble.cpp" });
 
-        for (dependencies) |dep| {
-            cmd.addFileInput(self.b.path(dep));
-        }
+        // const dirname = std.fs.path.dirname(output_path) orelse return error.NoParentDir;
+        // try std.fs.cwd().makePath(dirname);
 
-        self.step.dependOn(&cmd.step);
+        // std.fs.cwd().deleteFile(output_path) catch {};
+        // const file = try std.fs.cwd().createFile(output_path, .{});
+        // file.close();
+
+        // const cmd = self.b.addSystemCommand(&[_][]const u8{
+        //     "/bin/bash",
+        //     script_path,
+        //     output_path,
+        //     "clang",
+        //     "mlx",
+        //     "TRUE",
+        // });
+
+        // const dependencies = [_][]const u8{
+        //     "mlx/mlx/backend/common/compiled_preamble.h",
+        //     "mlx/mlx/types/half_types.h",
+        //     "mlx/mlx/types/fp16.h",
+        //     "mlx/mlx/types/bf16.h",
+        //     "mlx/mlx/types/complex.h",
+        //     "mlx/mlx/backend/common/ops.h",
+        // };
+
+        // for (dependencies) |dep| {
+        //     cmd.addFileInput(self.b.path(dep));
+        // }
+
+        // self.step.dependOn(&cmd.step);
     }
 
     // TODO fix the hardcoded install_prefix
