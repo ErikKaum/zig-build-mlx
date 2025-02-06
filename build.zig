@@ -604,6 +604,7 @@ const CompiledPreambleBuilder = struct {
     compiler: []const u8,
     is_clang: bool,
     step: *std.Build.Step,
+    root: []const u8,
 
     fn init(b: *std.Build, target: std.Build.ResolvedTarget) !CompiledPreambleBuilder {
         const is_darwin = target.result.isDarwin();
@@ -621,14 +622,14 @@ const CompiledPreambleBuilder = struct {
             .compiler = if (is_darwin) "clang" else "g++",
             .is_clang = is_darwin,
             .step = step,
+            .root = std.fs.path.dirname(@src().file) orelse ".",
         };
     }
 
     fn build(self: *const CompiledPreambleBuilder) !void {
-        const script_path = "mlx/mlx/backend/common/make_compiled_preamble.sh";
+        const script_path = self.b.pathJoin(&.{ self.root, "mlx", "mlx", "backend", "common", "make_compiled_preamble.sh" });
         const output_path = self.b.pathJoin(&.{ self.b.install_prefix, "include", "mlx", "backend", "common", "compiled_preamble.cpp" });
 
-        // Create parent directory if it doesn't exist
         const dirname = std.fs.path.dirname(output_path) orelse return error.NoParentDir;
         try std.fs.cwd().makePath(dirname);
 
@@ -636,18 +637,15 @@ const CompiledPreambleBuilder = struct {
         const file = try std.fs.cwd().createFile(output_path, .{});
         file.close();
 
-        const project_root = "/Users/erikkaum/Documents/testing/zig-build-mlx/mlx";
-
         const cmd = self.b.addSystemCommand(&[_][]const u8{
             "/bin/bash",
             script_path,
             output_path,
             "clang",
-            project_root,
+            "mlx",
             "TRUE",
         });
 
-        // Add dependencies to track file changes
         const dependencies = [_][]const u8{
             "mlx/mlx/backend/common/compiled_preamble.h",
             "mlx/mlx/types/half_types.h",
@@ -664,9 +662,8 @@ const CompiledPreambleBuilder = struct {
         self.step.dependOn(&cmd.step);
     }
 
-    // TODO don't hard code like this
     fn getOutputPath(self: *const CompiledPreambleBuilder) []const u8 {
-        return self.b.pathJoin(&.{ "zig-out", "include", "mlx", "backend", "common", "compiled_preamble.cpp" });
+        return self.b.pathJoin(&.{ self.b.install_prefix, "include", "mlx", "backend", "common", "compiled_preamble.cpp" });
     }
 };
 
