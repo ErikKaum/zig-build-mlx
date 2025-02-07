@@ -7,6 +7,22 @@
     // with this value.
     //.minimum_zig_version = "0.11.0",
 
+    .dependencies = .{
+        // the original MLX repo
+        .mlx = .{
+            .url = "https://github.com/ml-explore/mlx/archive/refs/tags/v0.21.0.tar.gz",
+            .hash = "1220d24e8ea45a42f1e5b4928f0991cb2d15fb502e602d57c1551cca4f702398e7f0",
+        },
+        .fmt = .{
+            .url = "https://github.com/fmtlib/fmt/archive/refs/tags/10.2.1.tar.gz",
+            .hash = "12202f41bb1cbca6f555a37883ce510374b9ca577ed5cd117d71c7bdc2c87380e14d",
+        },
+        .doctest = .{
+            .url = "https://github.com/onqtam/doctest/archive/ae7a13539fb71f270b87eb2e874fbac80bc8dda2.tar.gz",
+            .hash = "122096861db579324f273ad4edb22173610ec916b09e65d85dc644449de2754bf912",
+        },
+    },
+
     .paths = .{
         "build.zig",
         "build.zig.zon",

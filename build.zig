@@ -58,24 +58,30 @@ pub fn build(b: *std.Build) !void {
     const options = BuildOptions.fromOptions(b);
 
     // Initialize dependencies
-    // const deps = try Dependencies.init(b, options);
+    const deps = try Dependencies.init(b, options, target, optimize);
 
-    // Core MLX library
+    // Original MLX, let's not call it "mlx" since that could be easy to confuse with the mlx lib we're now building
+    // const og_mlx = b.dependency("mlx", .{
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+
+    // Zig built MLX
     const lib = b.addStaticLibrary(.{
         .name = "mlx",
         .target = target,
         .optimize = optimize,
     });
 
+    lib.addIncludePath(deps.fmt.path("include"));
+
     // TODO this gets all headers, not sure we need all e.g. for metal kernels etc
+    // lib.installHeadersDirectory(og_mlx.path("mlx"), "mlx", .{});
+    // lib.addIncludePath(og_mlx.path("mlx"));
+
     lib.installHeadersDirectory(b.path("upstream/mlx/mlx"), "mlx", .{});
     lib.addIncludePath(b.path("upstream/mlx"));
     lib.linkLibCpp();
-
-    // Adds the fmt headers only
-    // TODO figure out best way to download them, or just use a git submodule
-    lib.addIncludePath(b.path("upstream/fmt/include"));
-    // lib.defineCMacro("FMT_HEADER_ONLY", "1");
 
     // Add core sources
     lib.addCSourceFiles(.{ .files = &core_sources, .flags = &CPP_FLAGS });
@@ -239,7 +245,7 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         });
 
-        tests.addIncludePath(b.path("doctest"));
+        tests.addIncludePath(deps.doctest.?.path("."));
 
         tests.addCSourceFiles(.{ .files = &test_sources, .flags = &CPP_FLAGS });
 
@@ -530,14 +536,18 @@ const base_headers = [_][]const u8{
 // TODO these are now kinda written as if they have build.zig files, which is not the case
 // create a more unified and foolproof way to download and build the correct stuff
 const Dependencies = struct {
-    // fmt: *std.Build.Dependency,
-    // doctest: ?*std.Build.Dependency,
+    fmt: *std.Build.Dependency,
+    doctest: ?*std.Build.Dependency,
     // json: ?*std.Build.Dependency,
     // gguflib: ?*std.Build.Dependency,
-    metal_cpp: ?*std.Build.Dependency = null,
+    // metal_cpp: ?*std.Build.Dependency = null,
     // nanobind: ?*std.Build.Dependency = null, this is to build python binding add back later
 
-    fn init(b: *std.Build, options: BuildOptions) !Dependencies {
+    fn init(b: *std.Build, options: BuildOptions, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) !Dependencies {
+        const fmt = b.dependency("fmt", .{
+            .target = target,
+            .optimize = optimize,
+        });
 
         // TODO fmt moved down, maybe okay to be there
         // const fmt = b.dependency("fmt", .{
@@ -545,12 +555,10 @@ const Dependencies = struct {
         //     .hash = "1220f6c1f5b8a20f51b2d3534296e2e1b910c3a1f5c8c08f9a8e8523a9c7c5e4d8c8", // You'll need to update this hash
         // });
 
-        // I'm pretty sure we don't need it since test are handeled natively in zig
-        // Optional dependencies based on build options
-        // const doctest = if (options.build_tests) b.dependency("doctest", .{
-        //     .url = "https://github.com/onqtam/doctest/archive/ae7a13539fb71f270b87eb2e874fbac80bc8dda2.tar.gz",
-        //     .hash = "...", // You'll need the actual hash
-        // }) else null;
+        const doctest = if (options.build_tests) b.dependency("doctest", .{
+            .target = target,
+            .optimize = optimize,
+        }) else null;
 
         // TODO figure out later how to include these
         // const json = if (options.build_safetensors) b.dependency("json", .{
@@ -565,10 +573,10 @@ const Dependencies = struct {
         // }) else null;
 
         // Initialize Metal C++ if needed
-        const metal_cpp = if (options.build_metal) b.dependency("metal_cpp", .{
-            .url = "https://developer.apple.com/metal/cpp/files/metal-cpp_macOS15_iOS18-beta.zip",
-            .hash = "...", // Add proper hash
-        }) else null;
+        // const metal_cpp = if (options.build_metal) b.dependency("metal_cpp", .{
+        //     .url = "https://developer.apple.com/metal/cpp/files/metal-cpp_macOS15_iOS18-beta.zip",
+        //     .hash = "...", // Add proper hash
+        // }) else null;
 
         // Initialize nanobind if Python bindings are enabled
         // const nanobind = if (options.build_python_bindings) b.dependency("nanobind", .{
@@ -577,11 +585,11 @@ const Dependencies = struct {
         // }) else null;
 
         return Dependencies{
-            // .fmt = fmt,
-            // .doctest = doctest,
+            .fmt = fmt,
+            .doctest = doctest,
             // .json = json,
             // .gguflib = gguflib,
-            .metal_cpp = metal_cpp,
+            // .metal_cpp = metal_cpp,
             // .nanobind = nanobind,
         };
     }
