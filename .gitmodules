@@ -1,9 +1,0 @@
-[submodule "mlx"]
-	path = mlx
-	url = git@github.com:ml-explore/mlx.git
-[submodule "doctest"]
-	path = doctest
-	url = git@github.com:doctest/doctest.git
-[submodule "fmt"]
-	path = fmt
-	url = git@github.com:fmtlib/fmt.git

@@ -11,8 +11,6 @@
         "build.zig",
         "build.zig.zon",
         "LICENSE",
-        "mlx",
-        "fmt",
-        "doctest",
+        "upstream",
     },
 }

@@ -68,13 +68,13 @@ pub fn build(b: *std.Build) !void {
     });
 
     // TODO this gets all headers, not sure we need all e.g. for metal kernels etc
-    lib.installHeadersDirectory(b.path("mlx/mlx"), "mlx", .{});
-    lib.addIncludePath(b.path("mlx"));
+    lib.installHeadersDirectory(b.path("upstream/mlx/mlx"), "mlx", .{});
+    lib.addIncludePath(b.path("upstream/mlx"));
     lib.linkLibCpp();
 
     // Adds the fmt headers only
     // TODO figure out best way to download them, or just use a git submodule
-    lib.addIncludePath(b.path("fmt/include"));
+    lib.addIncludePath(b.path("upstream/fmt/include"));
     // lib.defineCMacro("FMT_HEADER_ONLY", "1");
 
     // Add core sources
@@ -83,25 +83,25 @@ pub fn build(b: *std.Build) !void {
     // TODO check that the files included for safetensors and ggufs are really correct
     if (options.build_safetensors) {
         lib.addCSourceFile(.{
-            .file = b.path("mlx/mlx/io/safetensors.cpp"),
+            .file = b.path("upstream/mlx/mlx/io/safetensors.cpp"),
             .flags = &CPP_FLAGS,
         });
     } else {
         lib.addCSourceFile(.{
-            .file = b.path("mlx/mlx/io/no_safetensors.cpp"),
+            .file = b.path("upstream/mlx/mlx/io/no_safetensors.cpp"),
             .flags = &CPP_FLAGS,
         });
     }
 
     if (options.build_gguf) {
         const gguf_sources = [_][]const u8{
-            "mlx/mlx/io/gguf.cpp",
-            "mlx/mlx/io/gguf_quants.cpp",
+            "upstream/mlx/mlx/io/gguf.cpp",
+            "upstream/mlx/mlx/io/gguf_quants.cpp",
         };
         lib.addCSourceFiles(.{ .files = &gguf_sources, .flags = &CPP_FLAGS });
     } else {
         lib.addCSourceFile(.{
-            .file = b.path("mlx/mlx/io/no_gguf.cpp"),
+            .file = b.path("upstream/mlx/mlx/io/no_gguf.cpp"),
             .flags = &CPP_FLAGS,
         });
     }
@@ -168,12 +168,12 @@ pub fn build(b: *std.Build) !void {
         // Add conditional source files based on JIT
         if (options.metal_jit) {
             lib.addCSourceFile(.{
-                .file = b.path("mlx/mlx/backend/metal/jit_kernels.cpp"),
+                .file = b.path("upstream/mlx/mlx/backend/metal/jit_kernels.cpp"),
                 .flags = &CPP_FLAGS,
             });
         } else {
             lib.addCSourceFile(.{
-                .file = b.path("mlx/mlx/backend/metal/nojit_kernels.cpp"),
+                .file = b.path("upstream/mlx/mlx/backend/metal/nojit_kernels.cpp"),
                 .flags = &CPP_FLAGS,
             });
         }
@@ -187,12 +187,12 @@ pub fn build(b: *std.Build) !void {
         // Add IOS-specific sources
         if (target.query.os_tag == std.Target.Os.Tag.ios) { // TODO check if this is way of confirming iOS
             lib.addCSourceFile(.{
-                .file = b.path("mlx/mlx/backend/common/compiled_nocpu.cpp"),
+                .file = b.path("upstream/mlx/mlx/backend/common/compiled_nocpu.cpp"),
                 .flags = &CPP_FLAGS,
             });
         } else {
             lib.addCSourceFile(.{
-                .file = b.path("mlx/mlx/backend/common/compiled_cpu.cpp"),
+                .file = b.path("upstream/mlx/mlx/backend/common/compiled_cpu.cpp"),
                 .flags = &CPP_FLAGS,
             });
         }
@@ -200,7 +200,7 @@ pub fn build(b: *std.Build) !void {
         // Add default primitives when not using Accelerate
         if (options.build_cpu and !is_darwin) {
             lib.addCSourceFile(.{
-                .file = b.path("mlx/mlx/backend/common/default_primitives.cpp"),
+                .file = b.path("upstream/mlx/mlx/backend/common/default_primitives.cpp"),
                 .flags = &CPP_FLAGS,
             });
         }
@@ -244,7 +244,7 @@ pub fn build(b: *std.Build) !void {
         tests.addCSourceFiles(.{ .files = &test_sources, .flags = &CPP_FLAGS });
 
         if (options.build_metal) {
-            tests.addCSourceFile(.{ .file = b.path("mlx/tests/metal_tests.cpp"), .flags = &CPP_FLAGS });
+            tests.addCSourceFile(.{ .file = b.path("upstream/mlx/tests/metal_tests.cpp"), .flags = &CPP_FLAGS });
         }
 
         tests.linkLibrary(lib);
@@ -469,9 +469,9 @@ const MetalKernelBuilder = struct {
 
     fn getVersionIncludes(self: *const MetalKernelBuilder) []const u8 {
         return if (self.metal_version >= 310)
-            "mlx/backend/metal/kernels/metal_3_1"
+            "upstream/mlx/backend/metal/kernels/metal_3_1"
         else
-            "mlx/backend/metal/kernels/metal_3_0";
+            "upstream/mlx/backend/metal/kernels/metal_3_0";
     }
 };
 
@@ -601,9 +601,9 @@ fn build_preamble(b: *std.Build, lib: *std.Build.Step.Compile) !void {
     const preprocess = b.addSystemCommand(&[_][]const u8{
         "c++",
         "-I",
-        b.pathJoin(&.{ pkg_path, "mlx" }),
+        b.pathJoin(&.{ pkg_path, "upstream", "mlx" }),
         "-E",
-        b.pathJoin(&.{ pkg_path, "mlx", "mlx", "backend", "common", "compiled_preamble.h" }),
+        b.pathJoin(&.{ pkg_path, "upstream", "mlx", "mlx", "backend", "common", "compiled_preamble.h" }),
     });
 
     const std_out_path = preprocess.captureStdOut();
@@ -844,25 +844,25 @@ fn checkMPI() !struct { found: bool, include_path: ?[]const u8 } {
 /////////////////////////
 
 const core_sources = [_][]const u8{
-    "mlx/mlx/allocator.cpp",
-    "mlx/mlx/array.cpp",
-    "mlx/mlx/compile.cpp",
-    "mlx/mlx/device.cpp",
-    "mlx/mlx/dtype.cpp",
-    "mlx/mlx/einsum.cpp",
-    "mlx/mlx/fast.cpp",
-    "mlx/mlx/fft.cpp",
-    "mlx/mlx/ops.cpp",
-    "mlx/mlx/graph_utils.cpp",
-    "mlx/mlx/primitives.cpp",
-    "mlx/mlx/random.cpp",
-    "mlx/mlx/scheduler.cpp",
-    "mlx/mlx/transforms.cpp",
-    "mlx/mlx/utils.cpp",
-    "mlx/mlx/linalg.cpp",
+    "upstream/mlx/mlx/allocator.cpp",
+    "upstream/mlx/mlx/array.cpp",
+    "upstream/mlx/mlx/compile.cpp",
+    "upstream/mlx/mlx/device.cpp",
+    "upstream/mlx/mlx/dtype.cpp",
+    "upstream/mlx/mlx/einsum.cpp",
+    "upstream/mlx/mlx/fast.cpp",
+    "upstream/mlx/mlx/fft.cpp",
+    "upstream/mlx/mlx/ops.cpp",
+    "upstream/mlx/mlx/graph_utils.cpp",
+    "upstream/mlx/mlx/primitives.cpp",
+    "upstream/mlx/mlx/random.cpp",
+    "upstream/mlx/mlx/scheduler.cpp",
+    "upstream/mlx/mlx/transforms.cpp",
+    "upstream/mlx/mlx/utils.cpp",
+    "upstream/mlx/mlx/linalg.cpp",
 
     // this is technically in the IO dir, but I added it here since it's always required
-    "mlx/mlx/io/load.cpp",
+    "upstream/mlx/mlx/io/load.cpp",
 };
 
 // TODO add later
@@ -873,34 +873,34 @@ const distributed_sources = [_][]const u8{
 };
 
 const metal_sources = [_][]const u8{
-    "mlx/mlx/backend/metal/allocator.cpp",
-    "mlx/mlx/backend/metal/binary.cpp",
-    "mlx/mlx/backend/metal/compiled.cpp",
-    "mlx/mlx/backend/metal/conv.cpp",
-    "mlx/mlx/backend/metal/copy.cpp",
-    "mlx/mlx/backend/metal/custom_kernel.cpp",
-    "mlx/mlx/backend/metal/distributed.cpp",
-    "mlx/mlx/backend/metal/device.cpp",
-    "mlx/mlx/backend/metal/event.cpp",
-    "mlx/mlx/backend/metal/fft.cpp",
-    "mlx/mlx/backend/metal/hadamard.cpp",
-    "mlx/mlx/backend/metal/indexing.cpp",
-    "mlx/mlx/backend/metal/matmul.cpp",
-    "mlx/mlx/backend/metal/scaled_dot_product_attention.cpp",
-    "mlx/mlx/backend/metal/metal.cpp",
-    "mlx/mlx/backend/metal/primitives.cpp",
-    "mlx/mlx/backend/metal/quantized.cpp",
-    "mlx/mlx/backend/metal/normalization.cpp",
-    "mlx/mlx/backend/metal/rope.cpp",
-    "mlx/mlx/backend/metal/scan.cpp",
-    "mlx/mlx/backend/metal/slicing.cpp",
-    "mlx/mlx/backend/metal/softmax.cpp",
-    "mlx/mlx/backend/metal/sort.cpp",
-    "mlx/mlx/backend/metal/reduce.cpp",
-    "mlx/mlx/backend/metal/ternary.cpp",
-    "mlx/mlx/backend/metal/unary.cpp",
-    "mlx/mlx/backend/metal/resident.cpp",
-    "mlx/mlx/backend/metal/utils.cpp",
+    "upstream/mlx/mlx/backend/metal/allocator.cpp",
+    "upstream/mlx/mlx/backend/metal/binary.cpp",
+    "upstream/mlx/mlx/backend/metal/conv.cpp",
+    "upstream/mlx/mlx/backend/metal/compiled.cpp",
+    "upstream/mlx/mlx/backend/metal/copy.cpp",
+    "upstream/mlx/mlx/backend/metal/custom_kernel.cpp",
+    "upstream/mlx/mlx/backend/metal/distributed.cpp",
+    "upstream/mlx/mlx/backend/metal/device.cpp",
+    "upstream/mlx/mlx/backend/metal/event.cpp",
+    "upstream/mlx/mlx/backend/metal/fft.cpp",
+    "upstream/mlx/mlx/backend/metal/hadamard.cpp",
+    "upstream/mlx/mlx/backend/metal/indexing.cpp",
+    "upstream/mlx/mlx/backend/metal/matmul.cpp",
+    "upstream/mlx/mlx/backend/metal/scaled_dot_product_attention.cpp",
+    "upstream/mlx/mlx/backend/metal/metal.cpp",
+    "upstream/mlx/mlx/backend/metal/primitives.cpp",
+    "upstream/mlx/mlx/backend/metal/quantized.cpp",
+    "upstream/mlx/mlx/backend/metal/normalization.cpp",
+    "upstream/mlx/mlx/backend/metal/rope.cpp",
+    "upstream/mlx/mlx/backend/metal/scan.cpp",
+    "upstream/mlx/mlx/backend/metal/slicing.cpp",
+    "upstream/mlx/mlx/backend/metal/softmax.cpp",
+    "upstream/mlx/mlx/backend/metal/sort.cpp",
+    "upstream/mlx/mlx/backend/metal/reduce.cpp",
+    "upstream/mlx/mlx/backend/metal/ternary.cpp",
+    "upstream/mlx/mlx/backend/metal/unary.cpp",
+    "upstream/mlx/mlx/backend/metal/resident.cpp",
+    "upstream/mlx/mlx/backend/metal/utils.cpp",
 };
 
 // TODO I probably don't need to have the .air files like this, should be able to grab the list by something else
@@ -911,84 +911,84 @@ const air_files = [_][]const u8{
 };
 
 const no_metal_sources = [_][]const u8{
-    "mlx/mlx/backend/no_metal/allocator.cpp",
-    "mlx/mlx/backend/no_metal/event.cpp",
-    "mlx/mlx/backend/no_metal/metal.cpp",
-    "mlx/mlx/backend/no_metal/primitives.cpp",
+    "upstream/mlx/mlx/backend/no_metal/allocator.cpp",
+    "upstream/mlx/mlx/backend/no_metal/event.cpp",
+    "upstream/mlx/mlx/backend/no_metal/metal.cpp",
+    "upstream/mlx/mlx/backend/no_metal/primitives.cpp",
 };
 
 const common_sources = [_][]const u8{
-    "mlx/mlx/backend/common/arg_reduce.cpp",
-    "mlx/mlx/backend/common/binary.cpp",
-    "mlx/mlx/backend/common/compiled.cpp",
-    "mlx/mlx/backend/common/common.cpp",
-    "mlx/mlx/backend/common/conv.cpp",
-    "mlx/mlx/backend/common/copy.cpp",
-    "mlx/mlx/backend/common/eigh.cpp",
-    "mlx/mlx/backend/common/erf.cpp",
-    "mlx/mlx/backend/common/fft.cpp",
-    "mlx/mlx/backend/common/hadamard.cpp",
-    "mlx/mlx/backend/common/masked_mm.cpp",
-    "mlx/mlx/backend/common/primitives.cpp",
-    "mlx/mlx/backend/common/quantized.cpp",
-    "mlx/mlx/backend/common/reduce.cpp",
-    "mlx/mlx/backend/common/reduce_utils.cpp",
-    "mlx/mlx/backend/common/scan.cpp",
-    "mlx/mlx/backend/common/select.cpp",
-    "mlx/mlx/backend/common/slicing.cpp",
-    "mlx/mlx/backend/common/softmax.cpp",
-    "mlx/mlx/backend/common/sort.cpp",
-    "mlx/mlx/backend/common/threefry.cpp",
-    "mlx/mlx/backend/common/indexing.cpp",
-    "mlx/mlx/backend/common/load.cpp",
-    "mlx/mlx/backend/common/qrf.cpp",
-    "mlx/mlx/backend/common/svd.cpp",
-    "mlx/mlx/backend/common/inverse.cpp",
-    "mlx/mlx/backend/common/cholesky.cpp",
-    "mlx/mlx/backend/common/utils.cpp",
+    "upstream/mlx/mlx/backend/common/arg_reduce.cpp",
+    "upstream/mlx/mlx/backend/common/binary.cpp",
+    "upstream/mlx/mlx/backend/common/compiled.cpp",
+    "upstream/mlx/mlx/backend/common/common.cpp",
+    "upstream/mlx/mlx/backend/common/conv.cpp",
+    "upstream/mlx/mlx/backend/common/copy.cpp",
+    "upstream/mlx/mlx/backend/common/eigh.cpp",
+    "upstream/mlx/mlx/backend/common/erf.cpp",
+    "upstream/mlx/mlx/backend/common/fft.cpp",
+    "upstream/mlx/mlx/backend/common/hadamard.cpp",
+    "upstream/mlx/mlx/backend/common/masked_mm.cpp",
+    "upstream/mlx/mlx/backend/common/primitives.cpp",
+    "upstream/mlx/mlx/backend/common/quantized.cpp",
+    "upstream/mlx/mlx/backend/common/reduce.cpp",
+    "upstream/mlx/mlx/backend/common/reduce_utils.cpp",
+    "upstream/mlx/mlx/backend/common/scan.cpp",
+    "upstream/mlx/mlx/backend/common/select.cpp",
+    "upstream/mlx/mlx/backend/common/slicing.cpp",
+    "upstream/mlx/mlx/backend/common/softmax.cpp",
+    "upstream/mlx/mlx/backend/common/sort.cpp",
+    "upstream/mlx/mlx/backend/common/threefry.cpp",
+    "upstream/mlx/mlx/backend/common/indexing.cpp",
+    "upstream/mlx/mlx/backend/common/load.cpp",
+    "upstream/mlx/mlx/backend/common/qrf.cpp",
+    "upstream/mlx/mlx/backend/common/svd.cpp",
+    "upstream/mlx/mlx/backend/common/inverse.cpp",
+    "upstream/mlx/mlx/backend/common/cholesky.cpp",
+    "upstream/mlx/mlx/backend/common/utils.cpp",
 
     // TODO here should come compiled preamble, but not like this
     // "zig-out/include/mlx/backend/common/compiled_preamble.cpp",
 };
 
 const no_cpu_sources = [_][]const u8{
-    "mlx/mlx/backend/no_cpu/primitives.cpp",
-    "mlx/mlx/backend/common/common.cpp",
-    "mlx/mlx/backend/common/compiled.cpp",
-    "mlx/mlx/backend/common/compiled_nocpu.cpp",
-    "mlx/mlx/backend/common/reduce_utils.cpp",
-    "mlx/mlx/backend/common/slicing.cpp",
-    "mlx/mlx/backend/common/utils.cpp",
+    "upstream/mlx/mlx/backend/no_cpu/primitives.cpp",
+    "upstream/mlx/mlx/backend/common/common.cpp",
+    "upstream/mlx/mlx/backend/common/compiled.cpp",
+    "upstream/mlx/mlx/backend/common/compiled_nocpu.cpp",
+    "upstream/mlx/mlx/backend/common/reduce_utils.cpp",
+    "upstream/mlx/mlx/backend/common/slicing.cpp",
+    "upstream/mlx/mlx/backend/common/utils.cpp",
 };
 
 const accelerate_sources = [_][]const u8{
-    "mlx/mlx/backend/accelerate/conv.cpp",
-    "mlx/mlx/backend/accelerate/matmul.cpp",
-    "mlx/mlx/backend/accelerate/primitives.cpp",
-    "mlx/mlx/backend/accelerate/quantized.cpp",
-    "mlx/mlx/backend/accelerate/reduce.cpp",
-    "mlx/mlx/backend/accelerate/softmax.cpp",
+    "upstream/mlx/mlx/backend/accelerate/conv.cpp",
+    "upstream/mlx/mlx/backend/accelerate/matmul.cpp",
+    "upstream/mlx/mlx/backend/accelerate/primitives.cpp",
+    "upstream/mlx/mlx/backend/accelerate/quantized.cpp",
+    "upstream/mlx/mlx/backend/accelerate/reduce.cpp",
+    "upstream/mlx/mlx/backend/accelerate/softmax.cpp",
 };
 
 const test_sources = [_][]const u8{
-    "mlx/tests/tests.cpp",
-    "mlx/tests/allocator_tests.cpp",
-    "mlx/tests/array_tests.cpp",
-    "mlx/tests/arg_reduce_tests.cpp",
-    "mlx/tests/autograd_tests.cpp",
-    "mlx/tests/blas_tests.cpp",
-    "mlx/tests/compile_tests.cpp",
-    "mlx/tests/custom_vjp_tests.cpp",
-    "mlx/tests/creations_tests.cpp",
-    "mlx/tests/device_tests.cpp",
-    "mlx/tests/einsum_tests.cpp",
-    "mlx/tests/eval_tests.cpp",
-    "mlx/tests/fft_tests.cpp",
-    "mlx/tests/load_tests.cpp",
-    "mlx/tests/ops_tests.cpp",
-    "mlx/tests/random_tests.cpp",
-    "mlx/tests/scheduler_tests.cpp",
-    "mlx/tests/utils_tests.cpp",
-    "mlx/tests/vmap_tests.cpp",
-    "mlx/tests/linalg_tests.cpp",
+    "upstream/mlx/tests/tests.cpp",
+    "upstream/mlx/tests/allocator_tests.cpp",
+    "upstream/mlx/tests/array_tests.cpp",
+    "upstream/mlx/tests/arg_reduce_tests.cpp",
+    "upstream/mlx/tests/autograd_tests.cpp",
+    "upstream/mlx/tests/blas_tests.cpp",
+    "upstream/mlx/tests/compile_tests.cpp",
+    "upstream/mlx/tests/custom_vjp_tests.cpp",
+    "upstream/mlx/tests/creations_tests.cpp",
+    "upstream/mlx/tests/device_tests.cpp",
+    "upstream/mlx/tests/einsum_tests.cpp",
+    "upstream/mlx/tests/eval_tests.cpp",
+    "upstream/mlx/tests/fft_tests.cpp",
+    "upstream/mlx/tests/load_tests.cpp",
+    "upstream/mlx/tests/ops_tests.cpp",
+    "upstream/mlx/tests/random_tests.cpp",
+    "upstream/mlx/tests/scheduler_tests.cpp",
+    "upstream/mlx/tests/utils_tests.cpp",
+    "upstream/mlx/tests/vmap_tests.cpp",
+    "upstream/mlx/tests/linalg_tests.cpp",
 };
