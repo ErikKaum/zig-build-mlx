@@ -593,7 +593,7 @@ const Dependencies = struct {
 
 fn build_preamble(b: *std.Build, lib: *std.Build.Step.Compile) !void {
     const wf = b.addWriteFiles();
-    const root = std.fs.path.dirname(@src().file) orelse ".";
+    const pkg_path = b.build_root.path.?;
     const is_darwin = true;
 
     // TODO fix this warning
@@ -601,9 +601,9 @@ fn build_preamble(b: *std.Build, lib: *std.Build.Step.Compile) !void {
     const preprocess = b.addSystemCommand(&[_][]const u8{
         "c++",
         "-I",
-        b.pathJoin(&.{ root, "mlx" }),
+        b.pathJoin(&.{ pkg_path, "mlx" }),
         "-E",
-        b.pathJoin(&.{ root, "mlx", "mlx", "backend", "common", "compiled_preamble.h" }),
+        b.pathJoin(&.{ pkg_path, "mlx", "mlx", "backend", "common", "compiled_preamble.h" }),
     });
 
     const std_out_path = preprocess.captureStdOut();
