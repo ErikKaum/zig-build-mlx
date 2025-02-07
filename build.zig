@@ -594,130 +594,177 @@ const Dependencies = struct {
 fn build_preamble(b: *std.Build, lib: *std.Build.Step.Compile) !void {
     const wf = b.addWriteFiles();
     const root = std.fs.path.dirname(@src().file) orelse ".";
-    const script_path = b.pathJoin(&.{ root, "mlx", "mlx", "backend", "common", "make_compiled_preamble.sh" });
+    const is_darwin = true;
 
-    // This is kinda hacky, better would be to have the contents of the file ready here and then just write it
-    const generated_cpp = wf.add("mlx/backend/common/compiled_preamble.cpp", "");
-    const dir_path = generated_cpp.dirname();
-
-    ////////////
-    const print_step = b.addSystemCommand(&[_][]const u8{
-        "bash",
-        "-c",
-        "echo 'Generated preamble path:' $(realpath $1)",
-        "--",
-    });
-    print_step.addFileArg(generated_cpp);
-    ////////////
-
-    const cmd = b.addSystemCommand(&[_][]const u8{
-        "/bin/bash",
-        script_path,
+    // TODO fix this warning
+    // clang++: warning: treating 'c-header' input as 'c++-header' when in C++ mode, this behavior is deprecated [-Wdeprecated]
+    const preprocess = b.addSystemCommand(&[_][]const u8{
+        "c++",
+        "-I",
+        b.pathJoin(&.{ root, "mlx" }),
+        "-E",
+        b.pathJoin(&.{ root, "mlx", "mlx", "backend", "common", "compiled_preamble.h" }),
     });
 
-    cmd.addFileArg(generated_cpp);
+    const std_out_path = preprocess.captureStdOut();
 
-    cmd.addArgs(&[_][]const u8{
-        "clang",
-        "mlx",
-        "TRUE",
-    });
+    const read_step = ReadFileStep.create(b, std_out_path);
+    read_step.step.dependOn(&preprocess.step);
 
-    cmd.step.dependOn(&wf.step);
+    const gen_step = GeneratePreambleStep.create(b, read_step, is_darwin, wf, lib);
+    gen_step.step.dependOn(&read_step.step);
 
-    lib.addIncludePath(dir_path);
-    lib.addCSourceFile(.{ .file = generated_cpp, .flags = &CPP_FLAGS });
+    // IMPORTANT: Make WriteFile step depend on generate step
+    wf.step.dependOn(&gen_step.step);
 
-    lib.step.dependOn(&wf.step);
-    lib.step.dependOn(&cmd.step);
+    const add_step = AddFileStep.create(b, lib, gen_step);
+    add_step.step.dependOn(&wf.step);
 
-    ///////
-    const print_option = b.step("print-preamble", "Print the location of the generated preamble file");
-    print_option.dependOn(&print_step.step);
-    b.getInstallStep().dependOn(&print_step.step);
+    lib.step.dependOn(&add_step.step);
 }
 
-const CompiledPreambleBuilder = struct {
+const ReadFileStep = struct {
+    const Self = @This();
+
+    step: std.Build.Step,
     b: *std.Build,
-    compiler: []const u8,
-    is_clang: bool,
-    step: *std.Build.Step,
-    root: []const u8,
+    path: std.Build.LazyPath,
+    contents: []const u8 = "",
 
-    fn init(b: *std.Build, target: std.Build.ResolvedTarget) !CompiledPreambleBuilder {
-        const is_darwin = target.result.isDarwin();
-
-        // Create a custom build step
-        const step = b.allocator.create(std.Build.Step) catch unreachable;
-        step.* = std.Build.Step.init(.{
-            .id = .custom,
-            .name = "compiled_preamble",
-            .owner = b,
-        });
-
-        return CompiledPreambleBuilder{
+    fn create(b: *std.Build, path: std.Build.LazyPath) *Self {
+        const new = b.allocator.create(Self) catch unreachable;
+        new.* = .{
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "read_file",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .path = path,
             .b = b,
-            .compiler = if (is_darwin) "clang" else "g++",
-            .is_clang = is_darwin,
-            .step = step,
-            .root = std.fs.path.dirname(@src().file) orelse ".",
         };
+        return new;
     }
 
-    fn build(self: *const CompiledPreambleBuilder, lib: *std.Build.Step.Compile) !void {
-        const wf = self.b.addWriteFiles();
-        const generated_cpp = wf.add("mlx/backend/common/compiled_preamble.cpp",
-            \\#include <iostream>
-            \\    std::cout << "Hello from generated C++ file!" << std::endl;
-            \\    return 0;
-            \\}
+    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
+        _ = prog_node;
+        const self: *Self = @fieldParentPtr("step", step);
+        const path = self.path.getPath(self.b);
+
+        self.contents = try std.fs.cwd().readFileAlloc(
+            self.b.allocator,
+            path,
+            std.math.maxInt(usize),
+        );
+    }
+};
+
+const GeneratePreambleStep = struct {
+    const Self = @This();
+
+    step: std.Build.Step,
+    b: *std.Build,
+    read_step: *ReadFileStep,
+    is_darwin: bool,
+    wf: *std.Build.Step.WriteFile,
+    output_path: std.Build.LazyPath,
+    lib: *std.Build.Step.Compile,
+
+    pub fn create(
+        b: *std.Build,
+        read_step: *ReadFileStep,
+        is_darwin: bool,
+        wf: *std.Build.Step.WriteFile,
+        lib: *std.Build.Step.Compile,
+    ) *GeneratePreambleStep {
+        const new = b.allocator.create(Self) catch unreachable;
+
+        new.* = .{
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "generate_preamble",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .b = b,
+            .read_step = read_step,
+            .is_darwin = is_darwin,
+            .wf = wf,
+            .output_path = undefined, // Will be set in make()
+            .lib = lib,
+        };
+
+        return new;
+    }
+
+    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
+        _ = prog_node;
+        const self: *Self = @fieldParentPtr("step", step);
+
+        var content = std.ArrayList(u8).init(self.b.allocator);
+        defer content.deinit();
+
+        try content.appendSlice(
+            \\const char* get_kernel_preamble() {
+            \\return R"preamble(
+            \\
         );
 
-        const cpp_path = generated_cpp.dirname();
+        if (self.is_darwin) {
+            try content.appendSlice(
+                \\#include <cmath>
+                \\#include <complex>
+                \\#include <cstdint>
+                \\#include <vector>
+                \\
+            );
+        }
 
-        lib.addIncludePath(cpp_path);
-        lib.addCSourceFile(.{ .file = generated_cpp });
+        try content.appendSlice(self.read_step.contents);
 
-        lib.step.dependOn(&wf.step);
+        try content.appendSlice(
+            \\
+            \\using namespace mlx::core;
+            \\using namespace mlx::core::detail;
+            \\)preamble";
+            \\}
+            \\
+        );
 
-        // const script_path = self.b.pathJoin(&.{ self.root, "mlx", "mlx", "backend", "common", "make_compiled_preamble.sh" });
-        // const output_path = self.b.pathJoin(&.{ self.b.install_prefix, "include", "mlx", "backend", "common", "compiled_preamble.cpp" });
+        self.output_path = self.wf.add("mlx/backend/common/compiled_preamble.cpp", content.items);
+    }
+};
 
-        // const dirname = std.fs.path.dirname(output_path) orelse return error.NoParentDir;
-        // try std.fs.cwd().makePath(dirname);
+const AddFileStep = struct {
+    const Self = @This();
 
-        // std.fs.cwd().deleteFile(output_path) catch {};
-        // const file = try std.fs.cwd().createFile(output_path, .{});
-        // file.close();
+    step: std.Build.Step,
+    b: *std.Build,
+    gen_step: *GeneratePreambleStep,
+    lib: *std.Build.Step.Compile,
 
-        // const cmd = self.b.addSystemCommand(&[_][]const u8{
-        //     "/bin/bash",
-        //     script_path,
-        //     output_path,
-        //     "clang",
-        //     "mlx",
-        //     "TRUE",
-        // });
-
-        // const dependencies = [_][]const u8{
-        //     "mlx/mlx/backend/common/compiled_preamble.h",
-        //     "mlx/mlx/types/half_types.h",
-        //     "mlx/mlx/types/fp16.h",
-        //     "mlx/mlx/types/bf16.h",
-        //     "mlx/mlx/types/complex.h",
-        //     "mlx/mlx/backend/common/ops.h",
-        // };
-
-        // for (dependencies) |dep| {
-        //     cmd.addFileInput(self.b.path(dep));
-        // }
-
-        // self.step.dependOn(&cmd.step);
+    fn create(b: *std.Build, lib: *std.Build.Step.Compile, gen_step: *GeneratePreambleStep) *Self {
+        const new = b.allocator.create(Self) catch unreachable;
+        new.* = .{
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "add_file",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .b = b,
+            .lib = lib,
+            .gen_step = gen_step,
+        };
+        return new;
     }
 
-    // TODO fix the hardcoded install_prefix
-    fn getOutputPath(self: *const CompiledPreambleBuilder) []const u8 {
-        return self.b.pathJoin(&.{ "zig-out", "include", "mlx", "backend", "common", "compiled_preamble.cpp" });
+    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
+        _ = prog_node;
+        const self: *Self = @fieldParentPtr("step", step);
+
+        const preamble_cpp_file = self.gen_step.output_path;
+        self.lib.addCSourceFile(.{ .file = preamble_cpp_file, .flags = &CPP_FLAGS });
     }
 };
 
