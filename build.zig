@@ -61,10 +61,10 @@ pub fn build(b: *std.Build) !void {
     const deps = try Dependencies.init(b, options, target, optimize);
 
     // Original MLX, let's not call it "mlx" since that could be easy to confuse with the mlx lib we're now building
-    // const og_mlx = b.dependency("mlx", .{
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
+    const og_mlx = b.dependency("mlx", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     // Zig built MLX
     const lib = b.addStaticLibrary(.{
@@ -76,15 +76,12 @@ pub fn build(b: *std.Build) !void {
     lib.addIncludePath(deps.fmt.path("include"));
 
     // TODO this gets all headers, not sure we need all e.g. for metal kernels etc
-    // lib.installHeadersDirectory(og_mlx.path("mlx"), "mlx", .{});
-    // lib.addIncludePath(og_mlx.path("mlx"));
-
-    lib.installHeadersDirectory(b.path("upstream/mlx/mlx"), "mlx", .{});
-    lib.addIncludePath(b.path("upstream/mlx"));
+    lib.installHeadersDirectory(og_mlx.path("."), ".", .{});
+    lib.addIncludePath(og_mlx.path("."));
     lib.linkLibCpp();
 
     // Add core sources
-    lib.addCSourceFiles(.{ .files = &core_sources, .flags = &CPP_FLAGS });
+    lib.addCSourceFiles(.{ .root = og_mlx.path("mlx"), .files = &core_sources, .flags = &CPP_FLAGS });
 
     // TODO check that the files included for safetensors and ggufs are really correct
     if (options.build_safetensors) {
@@ -94,7 +91,7 @@ pub fn build(b: *std.Build) !void {
         });
     } else {
         lib.addCSourceFile(.{
-            .file = b.path("upstream/mlx/mlx/io/no_safetensors.cpp"),
+            .file = og_mlx.path("mlx/io/no_safetensors.cpp"),
             .flags = &CPP_FLAGS,
         });
     }
@@ -107,7 +104,7 @@ pub fn build(b: *std.Build) !void {
         lib.addCSourceFiles(.{ .files = &gguf_sources, .flags = &CPP_FLAGS });
     } else {
         lib.addCSourceFile(.{
-            .file = b.path("upstream/mlx/mlx/io/no_gguf.cpp"),
+            .file = og_mlx.path("mlx/io/no_gguf.cpp"),
             .flags = &CPP_FLAGS,
         });
     }
@@ -125,12 +122,11 @@ pub fn build(b: *std.Build) !void {
         });
     }
 
-    try build_preamble(b, lib);
-
-    // should these be done earlier maybe?
     const is_darwin = target.result.isDarwin();
     const is_arm = std.Target.Cpu.Arch.isAARCH64(target.result.cpu.arch);
     const is_x86_64 = std.Target.Cpu.Arch.isX86(target.result.cpu.arch);
+
+    try build_preamble(b, lib, og_mlx, is_darwin);
 
     // Validate system requirements
     if (is_darwin and is_x86_64 and !options.enable_x64_mac) {
@@ -184,11 +180,15 @@ pub fn build(b: *std.Build) !void {
             });
         }
     } else {
-        lib.addCSourceFiles(.{ .files = &no_metal_sources, .flags = &CPP_FLAGS });
+        lib.addCSourceFiles(.{ .root = og_mlx.path("mlx"), .files = &no_metal_sources, .flags = &CPP_FLAGS });
     }
 
     if (options.build_cpu) {
-        lib.addCSourceFiles(.{ .files = &common_sources, .flags = &CPP_FLAGS });
+        lib.addCSourceFiles(.{
+            .root = og_mlx.path("mlx"),
+            .files = &common_sources,
+            .flags = &CPP_FLAGS,
+        });
 
         // Add IOS-specific sources
         if (target.query.os_tag == std.Target.Os.Tag.ios) { // TODO check if this is way of confirming iOS
@@ -198,7 +198,7 @@ pub fn build(b: *std.Build) !void {
             });
         } else {
             lib.addCSourceFile(.{
-                .file = b.path("upstream/mlx/mlx/backend/common/compiled_cpu.cpp"),
+                .file = og_mlx.path("mlx/backend/common/compiled_cpu.cpp"),
                 .flags = &CPP_FLAGS,
             });
         }
@@ -211,14 +211,14 @@ pub fn build(b: *std.Build) !void {
             });
         }
     } else {
-        lib.addCSourceFiles(.{ .files = &no_cpu_sources, .flags = &CPP_FLAGS });
+        lib.addCSourceFiles(.{ .root = og_mlx.path("mlx"), .files = &no_cpu_sources, .flags = &CPP_FLAGS });
     }
 
     // Link with system libraries
     if (is_darwin) {
         if (is_arm) {
             lib.linkFramework("Accelerate");
-            lib.addCSourceFiles(.{ .files = &accelerate_sources, .flags = &CPP_FLAGS });
+            lib.addCSourceFiles(.{ .root = og_mlx.path("mlx"), .files = &accelerate_sources, .flags = &CPP_FLAGS });
         }
     } else {
         // TODO check if these are correct
@@ -246,14 +246,13 @@ pub fn build(b: *std.Build) !void {
         });
 
         tests.addIncludePath(deps.doctest.?.path("."));
+        tests.linkLibrary(lib);
 
-        tests.addCSourceFiles(.{ .files = &test_sources, .flags = &CPP_FLAGS });
+        tests.addCSourceFiles(.{ .root = og_mlx.path("."), .files = &test_sources, .flags = &CPP_FLAGS });
 
         if (options.build_metal) {
-            tests.addCSourceFile(.{ .file = b.path("upstream/mlx/tests/metal_tests.cpp"), .flags = &CPP_FLAGS });
+            tests.addCSourceFile(.{ .file = b.path("tests/metal_tests.cpp"), .flags = &CPP_FLAGS });
         }
-
-        tests.linkLibrary(lib);
 
         const test_step = b.step("test", "Run library tests");
         const run_cmd = b.addRunArtifact(tests);
@@ -599,19 +598,17 @@ const Dependencies = struct {
 /// Build Preamble
 ///////////////////////////////////////
 
-fn build_preamble(b: *std.Build, lib: *std.Build.Step.Compile) !void {
+fn build_preamble(b: *std.Build, lib: *std.Build.Step.Compile, og_mlx: *std.Build.Dependency, is_darwin: bool) !void {
     const wf = b.addWriteFiles();
-    const pkg_path = b.build_root.path.?;
-    const is_darwin = true;
 
     // TODO fix this warning
     // clang++: warning: treating 'c-header' input as 'c++-header' when in C++ mode, this behavior is deprecated [-Wdeprecated]
     const preprocess = b.addSystemCommand(&[_][]const u8{
         "c++",
         "-I",
-        b.pathJoin(&.{ pkg_path, "upstream", "mlx" }),
+        b.pathJoin(&.{og_mlx.path(".").getPath(b)}),
         "-E",
-        b.pathJoin(&.{ pkg_path, "upstream", "mlx", "mlx", "backend", "common", "compiled_preamble.h" }),
+        b.pathJoin(&.{ og_mlx.path("mlx").getPath(b), "backend", "common", "compiled_preamble.h" }),
     });
 
     const std_out_path = preprocess.captureStdOut();
@@ -852,63 +849,63 @@ fn checkMPI() !struct { found: bool, include_path: ?[]const u8 } {
 /////////////////////////
 
 const core_sources = [_][]const u8{
-    "upstream/mlx/mlx/allocator.cpp",
-    "upstream/mlx/mlx/array.cpp",
-    "upstream/mlx/mlx/compile.cpp",
-    "upstream/mlx/mlx/device.cpp",
-    "upstream/mlx/mlx/dtype.cpp",
-    "upstream/mlx/mlx/einsum.cpp",
-    "upstream/mlx/mlx/fast.cpp",
-    "upstream/mlx/mlx/fft.cpp",
-    "upstream/mlx/mlx/ops.cpp",
-    "upstream/mlx/mlx/graph_utils.cpp",
-    "upstream/mlx/mlx/primitives.cpp",
-    "upstream/mlx/mlx/random.cpp",
-    "upstream/mlx/mlx/scheduler.cpp",
-    "upstream/mlx/mlx/transforms.cpp",
-    "upstream/mlx/mlx/utils.cpp",
-    "upstream/mlx/mlx/linalg.cpp",
+    "allocator.cpp",
+    "array.cpp",
+    "compile.cpp",
+    "device.cpp",
+    "dtype.cpp",
+    "einsum.cpp",
+    "fast.cpp",
+    "fft.cpp",
+    "ops.cpp",
+    "graph_utils.cpp",
+    "primitives.cpp",
+    "random.cpp",
+    "scheduler.cpp",
+    "transforms.cpp",
+    "utils.cpp",
+    "linalg.cpp",
 
     // this is technically in the IO dir, but I added it here since it's always required
-    "upstream/mlx/mlx/io/load.cpp",
+    "io/load.cpp",
 };
 
 // TODO add later
 // Add distributed and IO sources
 const distributed_sources = [_][]const u8{
-    // "mlx/mlx/distributed/distributed.cpp",
+    // "distributed/distributed.cpp",
     // Add other distributed source files
 };
 
 const metal_sources = [_][]const u8{
-    "upstream/mlx/mlx/backend/metal/allocator.cpp",
-    "upstream/mlx/mlx/backend/metal/binary.cpp",
-    "upstream/mlx/mlx/backend/metal/conv.cpp",
-    "upstream/mlx/mlx/backend/metal/compiled.cpp",
-    "upstream/mlx/mlx/backend/metal/copy.cpp",
-    "upstream/mlx/mlx/backend/metal/custom_kernel.cpp",
-    "upstream/mlx/mlx/backend/metal/distributed.cpp",
-    "upstream/mlx/mlx/backend/metal/device.cpp",
-    "upstream/mlx/mlx/backend/metal/event.cpp",
-    "upstream/mlx/mlx/backend/metal/fft.cpp",
-    "upstream/mlx/mlx/backend/metal/hadamard.cpp",
-    "upstream/mlx/mlx/backend/metal/indexing.cpp",
-    "upstream/mlx/mlx/backend/metal/matmul.cpp",
-    "upstream/mlx/mlx/backend/metal/scaled_dot_product_attention.cpp",
-    "upstream/mlx/mlx/backend/metal/metal.cpp",
-    "upstream/mlx/mlx/backend/metal/primitives.cpp",
-    "upstream/mlx/mlx/backend/metal/quantized.cpp",
-    "upstream/mlx/mlx/backend/metal/normalization.cpp",
-    "upstream/mlx/mlx/backend/metal/rope.cpp",
-    "upstream/mlx/mlx/backend/metal/scan.cpp",
-    "upstream/mlx/mlx/backend/metal/slicing.cpp",
-    "upstream/mlx/mlx/backend/metal/softmax.cpp",
-    "upstream/mlx/mlx/backend/metal/sort.cpp",
-    "upstream/mlx/mlx/backend/metal/reduce.cpp",
-    "upstream/mlx/mlx/backend/metal/ternary.cpp",
-    "upstream/mlx/mlx/backend/metal/unary.cpp",
-    "upstream/mlx/mlx/backend/metal/resident.cpp",
-    "upstream/mlx/mlx/backend/metal/utils.cpp",
+    "backend/metal/allocator.cpp",
+    "backend/metal/binary.cpp",
+    "backend/metal/conv.cpp",
+    "backend/metal/compiled.cpp",
+    "backend/metal/copy.cpp",
+    "backend/metal/custom_kernel.cpp",
+    "backend/metal/distributed.cpp",
+    "backend/metal/device.cpp",
+    "backend/metal/event.cpp",
+    "backend/metal/fft.cpp",
+    "backend/metal/hadamard.cpp",
+    "backend/metal/indexing.cpp",
+    "backend/metal/matmul.cpp",
+    "backend/metal/scaled_dot_product_attention.cpp",
+    "backend/metal/metal.cpp",
+    "backend/metal/primitives.cpp",
+    "backend/metal/quantized.cpp",
+    "backend/metal/normalization.cpp",
+    "backend/metal/rope.cpp",
+    "backend/metal/scan.cpp",
+    "backend/metal/slicing.cpp",
+    "backend/metal/softmax.cpp",
+    "backend/metal/sort.cpp",
+    "backend/metal/reduce.cpp",
+    "backend/metal/ternary.cpp",
+    "backend/metal/unary.cpp",
+    "backend/metal/resident.cpp",
+    "backend/metal/utils.cpp",
 };
 
 // TODO I probably don't need to have the .air files like this, should be able to grab the list by something else
@@ -919,84 +916,84 @@ const air_files = [_][]const u8{
 };
 
 const no_metal_sources = [_][]const u8{
-    "upstream/mlx/mlx/backend/no_metal/allocator.cpp",
-    "upstream/mlx/mlx/backend/no_metal/event.cpp",
-    "upstream/mlx/mlx/backend/no_metal/metal.cpp",
-    "upstream/mlx/mlx/backend/no_metal/primitives.cpp",
+    "backend/no_metal/allocator.cpp",
+    "backend/no_metal/event.cpp",
+    "backend/no_metal/metal.cpp",
+    "backend/no_metal/primitives.cpp",
 };
 
 const common_sources = [_][]const u8{
-    "upstream/mlx/mlx/backend/common/arg_reduce.cpp",
-    "upstream/mlx/mlx/backend/common/binary.cpp",
-    "upstream/mlx/mlx/backend/common/compiled.cpp",
-    "upstream/mlx/mlx/backend/common/common.cpp",
-    "upstream/mlx/mlx/backend/common/conv.cpp",
-    "upstream/mlx/mlx/backend/common/copy.cpp",
-    "upstream/mlx/mlx/backend/common/eigh.cpp",
-    "upstream/mlx/mlx/backend/common/erf.cpp",
-    "upstream/mlx/mlx/backend/common/fft.cpp",
-    "upstream/mlx/mlx/backend/common/hadamard.cpp",
-    "upstream/mlx/mlx/backend/common/masked_mm.cpp",
-    "upstream/mlx/mlx/backend/common/primitives.cpp",
-    "upstream/mlx/mlx/backend/common/quantized.cpp",
-    "upstream/mlx/mlx/backend/common/reduce.cpp",
-    "upstream/mlx/mlx/backend/common/reduce_utils.cpp",
-    "upstream/mlx/mlx/backend/common/scan.cpp",
-    "upstream/mlx/mlx/backend/common/select.cpp",
-    "upstream/mlx/mlx/backend/common/slicing.cpp",
-    "upstream/mlx/mlx/backend/common/softmax.cpp",
-    "upstream/mlx/mlx/backend/common/sort.cpp",
-    "upstream/mlx/mlx/backend/common/threefry.cpp",
-    "upstream/mlx/mlx/backend/common/indexing.cpp",
-    "upstream/mlx/mlx/backend/common/load.cpp",
-    "upstream/mlx/mlx/backend/common/qrf.cpp",
-    "upstream/mlx/mlx/backend/common/svd.cpp",
-    "upstream/mlx/mlx/backend/common/inverse.cpp",
-    "upstream/mlx/mlx/backend/common/cholesky.cpp",
-    "upstream/mlx/mlx/backend/common/utils.cpp",
+    "backend/common/arg_reduce.cpp",
+    "backend/common/binary.cpp",
+    "backend/common/compiled.cpp",
+    "backend/common/common.cpp",
+    "backend/common/conv.cpp",
+    "backend/common/copy.cpp",
+    "backend/common/eigh.cpp",
+    "backend/common/erf.cpp",
+    "backend/common/fft.cpp",
+    "backend/common/hadamard.cpp",
+    "backend/common/masked_mm.cpp",
+    "backend/common/primitives.cpp",
+    "backend/common/quantized.cpp",
+    "backend/common/reduce.cpp",
+    "backend/common/reduce_utils.cpp",
+    "backend/common/scan.cpp",
+    "backend/common/select.cpp",
+    "backend/common/slicing.cpp",
+    "backend/common/softmax.cpp",
+    "backend/common/sort.cpp",
+    "backend/common/threefry.cpp",
+    "backend/common/indexing.cpp",
+    "backend/common/load.cpp",
+    "backend/common/qrf.cpp",
+    "backend/common/svd.cpp",
+    "backend/common/inverse.cpp",
+    "backend/common/cholesky.cpp",
+    "backend/common/utils.cpp",
 
     // TODO here should come compiled preamble, but not like this
     // "zig-out/include/mlx/backend/common/compiled_preamble.cpp",
 };
 
 const no_cpu_sources = [_][]const u8{
-    "upstream/mlx/mlx/backend/no_cpu/primitives.cpp",
-    "upstream/mlx/mlx/backend/common/common.cpp",
-    "upstream/mlx/mlx/backend/common/compiled.cpp",
-    "upstream/mlx/mlx/backend/common/compiled_nocpu.cpp",
-    "upstream/mlx/mlx/backend/common/reduce_utils.cpp",
-    "upstream/mlx/mlx/backend/common/slicing.cpp",
-    "upstream/mlx/mlx/backend/common/utils.cpp",
+    "backend/no_cpu/primitives.cpp",
+    "backend/common/common.cpp",
+    "backend/common/compiled.cpp",
+    "backend/common/compiled_nocpu.cpp",
+    "backend/common/reduce_utils.cpp",
+    "backend/common/slicing.cpp",
+    "backend/common/utils.cpp",
 };
 
 const accelerate_sources = [_][]const u8{
-    "upstream/mlx/mlx/backend/accelerate/conv.cpp",
-    "upstream/mlx/mlx/backend/accelerate/matmul.cpp",
-    "upstream/mlx/mlx/backend/accelerate/primitives.cpp",
-    "upstream/mlx/mlx/backend/accelerate/quantized.cpp",
-    "upstream/mlx/mlx/backend/accelerate/reduce.cpp",
-    "upstream/mlx/mlx/backend/accelerate/softmax.cpp",
+    "backend/accelerate/conv.cpp",
+    "backend/accelerate/matmul.cpp",
+    "backend/accelerate/primitives.cpp",
+    "backend/accelerate/quantized.cpp",
+    "backend/accelerate/reduce.cpp",
+    "backend/accelerate/softmax.cpp",
 };
 
 const test_sources = [_][]const u8{
-    "upstream/mlx/tests/tests.cpp",
-    "upstream/mlx/tests/allocator_tests.cpp",
-    "upstream/mlx/tests/array_tests.cpp",
-    "upstream/mlx/tests/arg_reduce_tests.cpp",
-    "upstream/mlx/tests/autograd_tests.cpp",
-    "upstream/mlx/tests/blas_tests.cpp",
-    "upstream/mlx/tests/compile_tests.cpp",
-    "upstream/mlx/tests/custom_vjp_tests.cpp",
-    "upstream/mlx/tests/creations_tests.cpp",
-    "upstream/mlx/tests/device_tests.cpp",
-    "upstream/mlx/tests/einsum_tests.cpp",
-    "upstream/mlx/tests/eval_tests.cpp",
-    "upstream/mlx/tests/fft_tests.cpp",
-    "upstream/mlx/tests/load_tests.cpp",
-    "upstream/mlx/tests/ops_tests.cpp",
-    "upstream/mlx/tests/random_tests.cpp",
-    "upstream/mlx/tests/scheduler_tests.cpp",
-    "upstream/mlx/tests/utils_tests.cpp",
-    "upstream/mlx/tests/vmap_tests.cpp",
-    "upstream/mlx/tests/linalg_tests.cpp",
+    "tests/tests.cpp",
+    "tests/allocator_tests.cpp",
+    "tests/array_tests.cpp",
+    "tests/arg_reduce_tests.cpp",
+    "tests/autograd_tests.cpp",
+    "tests/blas_tests.cpp",
+    "tests/compile_tests.cpp",
+    "tests/custom_vjp_tests.cpp",
+    "tests/creations_tests.cpp",
+    "tests/device_tests.cpp",
+    "tests/einsum_tests.cpp",
+    "tests/eval_tests.cpp",
+    "tests/fft_tests.cpp",
+    "tests/load_tests.cpp",
+    "tests/ops_tests.cpp",
+    "tests/random_tests.cpp",
+    "tests/scheduler_tests.cpp",
+    "tests/utils_tests.cpp",
+    "tests/vmap_tests.cpp",
+    "tests/linalg_tests.cpp",
 };

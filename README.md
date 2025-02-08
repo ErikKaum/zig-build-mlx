@@ -27,7 +27,7 @@ In the chart this repo is the leftmost in the lower flow. So it's not strickly f
 - [ ] Metal JIT
 - [ ] Shared libs
 
-Besides these there are a bunch of TODOs in the `build.zig` file to double check that we're actually porting the functionality from CMake correctly.
+Besides these there are a bunch of TODOs in the `build.zig` file to double check that we're actually porting the functionality from CMake correctly. Also the build could probably be faster, I doubt things are done optimally now.
 
 ## Usage
 
