@@ -52,7 +52,3 @@ And in your `build.zig`:
 const mlx = b.dependency("mlx", .{ .target = target, .optimize = optimize });
 exe.linkLibrary(mlx.artifact("mlx"));
 ```
-
-
-## Acknowledgements
-This structure is inspired and follows a lot of zig builds made by @mitchellh. For example [zig-build.libxml2](https://github.com/mitchellh/zig-build-libxml2/tree/main) or [zig-build-zlib](https://github.com/mitchellh/zig-build-zlib)
