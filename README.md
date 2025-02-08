@@ -31,6 +31,8 @@ Besides these there are a bunch of TODOs in the `build.zig` file to double check
 
 ## Usage
 
+> ⚠️ **Caution**: I've only tested this with Zig v 0.13.0.
+
 Create a `build.zig.zon` like so:
 
 ```zig
