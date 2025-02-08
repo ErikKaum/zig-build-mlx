@@ -27,6 +27,5 @@
         "build.zig",
         "build.zig.zon",
         "LICENSE",
-        "upstream",
     },
 }
