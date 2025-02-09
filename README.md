@@ -6,7 +6,7 @@ To explain more further how this is setup, let's look at how the Swift bindings 
 
 You can make Zig bindings following a similar pattern, but since Zig is also a C/C++ compiler, we can integrate even further. We can build both MLX and MLX-C using Zig, which allows us to import them in the same way as code written in Zig. This also means that you get all the control of building MLX from the ground up. For example if you don't need support for GGUF or Safetensors? Just leave them out from the build.
 
-In the chart this repo is the leftmost in the lower flow. So it's not strickly fork of MLX nor is this the repo for Zig bindings to MLX. You can find the [Zig-build-mlx-C repo here]() and a repo exporing an example of language bindings [here](zig-mlx-example-bindings) 
+In the chart this repo is the leftmost in the lower flow. So it's not strickly fork of MLX nor is this the repo for Zig bindings to MLX. You can find the [Zig-build-mlx-C repo here](https://github.com/ErikKaum/zig-build-mlx-c) and a repo exporing an example of language bindings [here](https://github.com/ErikKaum/example-zig-mlx-bindings) 
 
 ![mlx-chart](https://github.com/erikkaum/zig-build-mlx/blob/main/assets/chart-mlx.png?raw=true)
 
