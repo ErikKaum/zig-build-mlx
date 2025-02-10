@@ -22,8 +22,8 @@ In the chart this repo is the leftmost in the lower flow. So it's not strickly f
 - [x] Build CPU
 - [ ] Metal debug
 - [ ] Enable x68 Mac
-- [ ] GGUF
-- [ ] Safetensors
+- [x] GGUF
+- [x] Safetensors
 - [ ] Metal JIT
 - [ ] Shared libs
 

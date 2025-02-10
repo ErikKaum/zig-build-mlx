@@ -25,6 +25,10 @@
             .url = "https://github.com/antirez/gguf-tools/archive/af7d88d808a7608a33723fba067036202910acb3.tar.gz",
             .hash = "1220343d07aa253b47f2ebd62b00dde201eef5517649057a611363e429133aef4c5c",
         },
+        .json = .{
+            .url = "https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.tar.gz",
+            .hash = "12203ada5de99b48676019c52ad8ea06a5cae74319c5f1fe5aaf020ec9636872f423",
+        },
     },
 
     .paths = .{

@@ -29,7 +29,7 @@ const BuildOptions = struct {
             .metal_debug = b.option(bool, "metal-debug", "Enhance metal debug workflow") orelse false,
             .enable_x64_mac = b.option(bool, "enable-x64-mac", "Enable building for x64 macOS") orelse false,
             .build_gguf = b.option(bool, "build-gguf", "Include support for GGUF format") orelse true,
-            .build_safetensors = b.option(bool, "build-safetensors", "Include support for safetensors format") orelse false,
+            .build_safetensors = b.option(bool, "build-safetensors", "Include support for safetensors format") orelse true,
             .metal_jit = b.option(bool, "metal-jit", "Use JIT compilation for Metal kernels") orelse false,
             .shared_libs = b.option(bool, "shared-libs", "Build mlx as a shared library") orelse false,
             .install_message = b.option(bool, "install-message", "Show installation messages") orelse false,
@@ -92,10 +92,13 @@ pub fn build(b: *std.Build) !void {
     // Add core sources
     lib.addCSourceFiles(.{ .root = og_mlx.path("mlx"), .files = &core_sources, .flags = &CPP_FLAGS });
 
-    // TODO check that the files included for safetensors and ggufs are really correct
     if (options.build_safetensors) {
+        if (deps.json) |json_dep| {
+            lib.addIncludePath(json_dep.path("single_include/nlohmann"));
+        }
+
         lib.addCSourceFile(.{
-            .file = b.path("upstream/mlx/mlx/io/safetensors.cpp"),
+            .file = og_mlx.path("mlx/io/safetensors.cpp"),
             .flags = &CPP_FLAGS,
         });
     } else {
@@ -573,7 +576,7 @@ const base_headers = [_][]const u8{
 const Dependencies = struct {
     fmt: *std.Build.Dependency,
     doctest: ?*std.Build.Dependency,
-    // json: ?*std.Build.Dependency,
+    json: ?*std.Build.Dependency,
     gguflib: ?*std.Build.Dependency,
     // metal_cpp: ?*std.Build.Dependency = null,
     // nanobind: ?*std.Build.Dependency = null, this is to build python binding add back later
@@ -595,11 +598,10 @@ const Dependencies = struct {
             .optimize = optimize,
         }) else null;
 
-        // TODO figure out later how to include these
-        // const json = if (options.build_safetensors) b.dependency("json", .{
-        //     .url = "https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz",
-        //     .hash = "...", // You'll need the actual hash
-        // }) else null;
+        const json = if (options.build_safetensors) b.dependency("json", .{
+            .target = target,
+            .optimize = optimize,
+        }) else null;
 
         const gguflib = if (options.build_gguf) b.dependency("gguflib", .{
             .target = target,
@@ -621,7 +623,7 @@ const Dependencies = struct {
         return Dependencies{
             .fmt = fmt,
             .doctest = doctest,
-            // .json = json,
+            .json = json,
             .gguflib = gguflib,
             // .metal_cpp = metal_cpp,
             // .nanobind = nanobind,
