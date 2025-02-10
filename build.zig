@@ -28,7 +28,7 @@ const BuildOptions = struct {
             .build_cpu = b.option(bool, "build-cpu", "Build cpu backend") orelse true,
             .metal_debug = b.option(bool, "metal-debug", "Enhance metal debug workflow") orelse false,
             .enable_x64_mac = b.option(bool, "enable-x64-mac", "Enable building for x64 macOS") orelse false,
-            .build_gguf = b.option(bool, "build-gguf", "Include support for GGUF format") orelse false,
+            .build_gguf = b.option(bool, "build-gguf", "Include support for GGUF format") orelse true,
             .build_safetensors = b.option(bool, "build-safetensors", "Include support for safetensors format") orelse false,
             .metal_jit = b.option(bool, "metal-jit", "Use JIT compilation for Metal kernels") orelse false,
             .shared_libs = b.option(bool, "shared-libs", "Build mlx as a shared library") orelse false,
@@ -41,6 +41,15 @@ const BuildOptions = struct {
 // Add compiler flags as constants
 const CPP_FLAGS = [_][]const u8{
     "-std=c++17",
+    "-fPIC",
+    "-DACCELERATE_NEW_LAPACK", // TODO this should be set conditionally
+    "-D_GLIBCXX_USE_CXX11_ABI=1",
+    // "-frtti",
+    "-fexceptions",
+};
+
+// Add compiler flags as constants
+const C_FLAGS = [_][]const u8{
     "-fPIC",
     "-DACCELERATE_NEW_LAPACK", // TODO this should be set conditionally
     "-D_GLIBCXX_USE_CXX11_ABI=1",
@@ -97,11 +106,38 @@ pub fn build(b: *std.Build) !void {
     }
 
     if (options.build_gguf) {
-        const gguf_sources = [_][]const u8{
-            "upstream/mlx/mlx/io/gguf.cpp",
-            "upstream/mlx/mlx/io/gguf_quants.cpp",
+        const gguf_dep = deps.gguflib.?;
+
+        lib.addIncludePath(gguf_dep.path("."));
+
+        const gguflib_lib = b.addStaticLibrary(.{
+            .name = "gguflib",
+            .target = target,
+            .optimize = optimize,
+        });
+
+        const gguflib_sources = [_][]const u8{
+            "fp16.c",
+            "gguflib.c",
         };
-        lib.addCSourceFiles(.{ .files = &gguf_sources, .flags = &CPP_FLAGS });
+
+        gguflib_lib.addCSourceFiles(.{
+            .root = gguf_dep.path("."),
+            .files = &gguflib_sources,
+            .flags = &C_FLAGS,
+        });
+
+        lib.linkLibrary(gguflib_lib);
+
+        const gguf_sources = [_][]const u8{
+            "io/gguf.cpp",
+            "io/gguf_quants.cpp",
+        };
+        lib.addCSourceFiles(.{
+            .root = og_mlx.path("mlx"),
+            .files = &gguf_sources,
+            .flags = &C_FLAGS,
+        });
     } else {
         lib.addCSourceFile(.{
             .file = og_mlx.path("mlx/io/no_gguf.cpp"),
@@ -538,7 +574,7 @@ const Dependencies = struct {
     fmt: *std.Build.Dependency,
     doctest: ?*std.Build.Dependency,
     // json: ?*std.Build.Dependency,
-    // gguflib: ?*std.Build.Dependency,
+    gguflib: ?*std.Build.Dependency,
     // metal_cpp: ?*std.Build.Dependency = null,
     // nanobind: ?*std.Build.Dependency = null, this is to build python binding add back later
 
@@ -565,11 +601,10 @@ const Dependencies = struct {
         //     .hash = "...", // You'll need the actual hash
         // }) else null;
 
-        // TODO same for this one
-        // const gguflib = if (options.build_gguf) b.dependency("gguflib", .{
-        //     .url = "https://github.com/antirez/gguf-tools/archive/af7d88d808a7608a33723fba067036202910acb3.tar.gz",
-        //     .hash = "...", // You'll need the actual hash
-        // }) else null;
+        const gguflib = if (options.build_gguf) b.dependency("gguflib", .{
+            .target = target,
+            .optimize = optimize,
+        }) else null;
 
         // Initialize Metal C++ if needed
         // const metal_cpp = if (options.build_metal) b.dependency("metal_cpp", .{
@@ -587,7 +622,7 @@ const Dependencies = struct {
             .fmt = fmt,
             .doctest = doctest,
             // .json = json,
-            // .gguflib = gguflib,
+            .gguflib = gguflib,
             // .metal_cpp = metal_cpp,
             // .nanobind = nanobind,
         };
