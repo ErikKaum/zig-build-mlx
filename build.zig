@@ -24,7 +24,7 @@ const BuildOptions = struct {
             .build_examples = b.option(bool, "build-examples", "Build examples for mlx") orelse false,
             .build_benchmarks = b.option(bool, "build-benchmarks", "Build benchmarks for mlx") orelse false,
             .build_python_bindings = b.option(bool, "build-python", "Build python bindings for mlx") orelse false,
-            .build_metal = b.option(bool, "build-metal", "Build metal backend") orelse false,
+            .build_metal = b.option(bool, "build-metal", "Build metal backend") orelse true,
             .build_cpu = b.option(bool, "build-cpu", "Build cpu backend") orelse true,
             .metal_debug = b.option(bool, "metal-debug", "Enhance metal debug workflow") orelse false,
             .enable_x64_mac = b.option(bool, "enable-x64-mac", "Enable building for x64 macOS") orelse false,
@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) !void {
     });
 
     lib.addIncludePath(deps.fmt.path("include"));
+    lib.defineCMacro("FMT_HEADER_ONLY", "1");
 
     // TODO this gets all headers, not sure we need all e.g. for metal kernels etc
     lib.installHeadersDirectory(og_mlx.path("."), ".", .{});
@@ -176,48 +177,35 @@ pub fn build(b: *std.Build) !void {
     if (is_darwin and options.build_metal) {
         const sdk_version = try checkMacOSSDKVersion();
         if (sdk_version < 14.0) {
-            @panic("MLX requires macOS SDK >= 14.0 to be built with MLX_BUILD_METAL=ON");
+            @panic("MLX requires macOS SDK >= 14.0 to be built with -Dbuild-metal=true");
         }
     }
 
     // Metal support (Darwin only)
     if (options.build_metal) {
+        const root = deps.metal_cpp.?.path(".");
+        lib.addIncludePath(root);
+        lib.installHeadersDirectory(root, ".", .{ .include_extensions = &.{".hpp"} });
+
+        // TODO have to figure out how the vision OS thing works:
+        // /Users/erikkaum/.cache/zig/p/1220d24e8ea45a42f1e5b4928f0991cb2d15fb502e602d57c1551cca4f702398e7f0/mlx/backend/metal/device.cpp:28:56
+        lib.addCSourceFiles(.{ .root = og_mlx.path("mlx"), .files = &metal_sources, .flags = &CPP_FLAGS });
+
+        const metal_lib_path_raw = try runKernelBuild(b, og_mlx, options);
+        const metal_lib_path = try std.fmt.allocPrint(b.allocator, "\"{s}\"", .{metal_lib_path_raw});
+        lib.defineCMacro("METAL_PATH", metal_lib_path);
+
+        if (options.metal_jit) {
+            lib.addCSourceFile(.{ .file = og_mlx.path("mlx/backend/metal/jit_kernels.cpp") });
+        } else {
+            lib.addCSourceFile(.{ .file = og_mlx.path("mlx/backend/metal/nojit_kernels.cpp") });
+        }
+
+        try build_jit_sources(b, lib, og_mlx, options);
+
         lib.linkFramework("Metal");
         lib.linkFramework("Foundation");
         lib.linkFramework("QuartzCore");
-
-        lib.addCSourceFiles(.{ .files = &metal_sources, .flags = &CPP_FLAGS });
-
-        const metal_builder = try MetalKernelBuilder.init(b, target, options);
-        try metal_builder.buildCoreKernels();
-
-        if (options.metal_jit) {
-            try metal_builder.buildJitKernels();
-        } else {
-            try metal_builder.buildNonJitKernels();
-        }
-
-        try metal_builder.buildMetallib();
-
-        // Add Metal-specific compile definition
-        lib.defineCMacro("METAL_PATH", try std.fmt.allocPrint(
-            b.allocator,
-            "{s}/mlx.metallib",
-            .{metal_builder.metal_path},
-        ));
-
-        // Add conditional source files based on JIT
-        if (options.metal_jit) {
-            lib.addCSourceFile(.{
-                .file = b.path("upstream/mlx/mlx/backend/metal/jit_kernels.cpp"),
-                .flags = &CPP_FLAGS,
-            });
-        } else {
-            lib.addCSourceFile(.{
-                .file = b.path("upstream/mlx/mlx/backend/metal/nojit_kernels.cpp"),
-                .flags = &CPP_FLAGS,
-            });
-        }
     } else {
         lib.addCSourceFiles(.{ .root = og_mlx.path("mlx"), .files = &no_metal_sources, .flags = &CPP_FLAGS });
     }
@@ -266,14 +254,6 @@ pub fn build(b: *std.Build) !void {
         lib.linkSystemLibrary("blas");
     }
 
-    // Link dependencies
-    // if (deps.gguflib) |gguf| {
-    //     lib.linkLibrary(gguf.artifact("gguf"));
-    // }
-    // if (deps.json) |json| {
-    //     lib.addIncludePath(json.path(b.pathJoin(&.{ "single_include", "nlohmann" })));
-    // }
-
     // Install
     b.installArtifact(lib);
 
@@ -290,7 +270,7 @@ pub fn build(b: *std.Build) !void {
         tests.addCSourceFiles(.{ .root = og_mlx.path("."), .files = &test_sources, .flags = &CPP_FLAGS });
 
         if (options.build_metal) {
-            tests.addCSourceFile(.{ .file = b.path("tests/metal_tests.cpp"), .flags = &CPP_FLAGS });
+            tests.addCSourceFile(.{ .file = og_mlx.path("tests/metal_tests.cpp"), .flags = &CPP_FLAGS });
         }
 
         const test_step = b.step("test", "Run library tests");
@@ -305,280 +285,245 @@ pub fn build(b: *std.Build) !void {
 /// Everything to build metal kernels
 ///////////////////////////////////////
 
-const MetalKernelBuilder = struct {
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    metal_path: []const u8,
-    metal_debug: bool,
-    metal_jit: bool,
-    metal_version: u32,
+fn runKernelBuild(b: *std.Build, og_mlx: *std.Build.Dependency, options: BuildOptions) ![]const u8 {
+    var airFiles = std.ArrayList(std.Build.LazyPath).init(b.allocator);
+    defer airFiles.deinit();
 
-    fn init(b: *std.Build, target: std.Build.ResolvedTarget, options: BuildOptions) !MetalKernelBuilder {
-        const metal_path = b.pathJoin(&.{ b.cache_root.path.?, "metal" });
-        return MetalKernelBuilder{
-            .b = b,
-            .target = target,
-            .metal_path = metal_path,
-            .metal_debug = options.metal_debug,
-            .metal_jit = options.metal_jit,
-            .metal_version = try determineMetalVersion(),
-        };
+    // always build
+    try airFiles.append(try buildKernel(b, "arg_reduce", og_mlx));
+    try airFiles.append(try buildKernel(b, "conv", og_mlx));
+    try airFiles.append(try buildKernel(b, "gemv", og_mlx));
+    try airFiles.append(try buildKernel(b, "layer_norm", og_mlx));
+    try airFiles.append(try buildKernel(b, "random", og_mlx));
+    try airFiles.append(try buildKernel(b, "rms_norm", og_mlx));
+    try airFiles.append(try buildKernel(b, "rope", og_mlx));
+    try airFiles.append(try buildKernel(b, "scaled_dot_product_attention", og_mlx));
+    try airFiles.append(try buildKernel(b, "steel/attn/kernels/steel_attention", og_mlx));
+
+    if (!options.metal_jit) {
+        try airFiles.append(try buildKernel(b, "arange", og_mlx));
+        try airFiles.append(try buildKernel(b, "binary", og_mlx));
+        try airFiles.append(try buildKernel(b, "binary_two", og_mlx));
+        try airFiles.append(try buildKernel(b, "copy", og_mlx));
+        try airFiles.append(try buildKernel(b, "fft", og_mlx));
+        try airFiles.append(try buildKernel(b, "reduce", og_mlx));
+        try airFiles.append(try buildKernel(b, "quantized", og_mlx));
+        try airFiles.append(try buildKernel(b, "scan", og_mlx));
+        try airFiles.append(try buildKernel(b, "softmax", og_mlx));
+        try airFiles.append(try buildKernel(b, "sort", og_mlx));
+        try airFiles.append(try buildKernel(b, "ternary", og_mlx));
+        try airFiles.append(try buildKernel(b, "unary", og_mlx));
+        try airFiles.append(try buildKernel(b, "steel/conv/kernels/steel_conv", og_mlx));
+        try airFiles.append(try buildKernel(b, "steel/conv/kernels/steel_conv_general", og_mlx));
+        try airFiles.append(try buildKernel(b, "steel/gemm/kernels/steel_gemm_fused", og_mlx));
+        try airFiles.append(try buildKernel(b, "steel/gemm/kernels/steel_gemm_masked", og_mlx));
+        try airFiles.append(try buildKernel(b, "steel/gemm/kernels/steel_gemm_splitk", og_mlx));
+        try airFiles.append(try buildKernel(b, "gemv_masked", og_mlx));
     }
 
-    fn determineMetalVersion() !u32 {
-        // Run xcrun to determine Metal version
-        const result = try std.process.Child.run(.{
-            .allocator = std.heap.page_allocator,
-            .argv = &[_][]const u8{
-                "xcrun", "-sdk", "macosx",   "metal", "-E", "-x", "metal",
-                "-P",    "-",    "-include", "metal",
-            },
-        });
-        defer std.heap.page_allocator.free(result.stdout);
-        defer std.heap.page_allocator.free(result.stderr);
+    // finally build the metallib which depends on all the air files
+    const full_metal_path = try buildMetallib(b, airFiles.items);
+    return full_metal_path;
+}
 
-        // TODO Parse real version from output
-        return 310; // Default to Metal 3.1
+// The original MLX uses dependency tracking for file changes, I've chosen to omit this for now
+fn buildKernel(b: *std.Build, comptime rel_path: []const u8, og_mlx: *std.Build.Dependency) !std.Build.LazyPath {
+
+    // if name has slashes just grab the last name after the last slash, should be fine
+    const name = comptime (if (std.mem.lastIndexOf(u8, rel_path, "/")) |last_slash|
+        rel_path[(last_slash + 1)..]
+    else
+        rel_path);
+
+    var metal_flags = std.ArrayList([]const u8).init(b.allocator);
+    defer metal_flags.deinit();
+
+    try metal_flags.appendSlice(&[_][]const u8{
+        "-Wall",
+        "-Wextra",
+        "-fno-fast-math",
+    });
+
+    // TODO don't hard code
+    const version_include = getVersionIncludes(310);
+    try metal_flags.appendSlice(&[_][]const u8{
+        "-I",
+        og_mlx.path(version_include).getPath(b),
+    });
+
+    // In the CMake PROJECT_SOURCE_DIR is always included
+    try metal_flags.appendSlice(&[_][]const u8{
+        "-I",
+        og_mlx.path(".").getPath(b),
+    });
+
+    const source_path = "mlx/backend/metal/kernels/" ++ rel_path ++ ".metal";
+    const source_path_lazy = og_mlx.path(source_path);
+
+    // Create system command for metal compilation.
+    const metal_cmd = b.addSystemCommand(&[_][]const u8{
+        "xcrun",
+        "-sdk",
+        "macosx",
+        "metal",
+    });
+    metal_cmd.addArgs(metal_flags.items);
+
+    metal_cmd.addArg("-c");
+    metal_cmd.addArg(source_path_lazy.getPath(b));
+    metal_cmd.addArg("-o");
+    const out_file_name = name ++ ".air";
+    const output_path = metal_cmd.addOutputFileArg(out_file_name);
+
+    // ---------------------------------------------------------------------
+
+    const dest_rel_path = "include/mlx/backend/metal/kernels/" ++ name ++ ".air";
+    const metal_install = b.addInstallFile(output_path, dest_rel_path);
+    metal_install.step.dependOn(&metal_cmd.step);
+
+    // ---------------------------------------------------------------------
+
+    b.default_step.dependOn(&metal_install.step);
+
+    return output_path;
+}
+
+fn buildMetallib(b: *std.Build, air_files: []std.Build.LazyPath) ![]const u8 {
+    const metallib_cmd = b.addSystemCommand(&[_][]const u8{
+        "xcrun",
+        "-sdk",
+        "macosx",
+        "metallib",
+    });
+
+    for (air_files) |air| {
+        metallib_cmd.addFileArg(air);
     }
 
-    fn buildKernel(self: *const MetalKernelBuilder, name: []const u8, deps: []const []const u8) !void {
-        var metal_flags = std.ArrayList([]const u8).init(self.b.allocator);
-        defer metal_flags.deinit();
+    metallib_cmd.addArg("-o");
+    const metallib_file = metallib_cmd.addOutputFileArg("mlx.metallib");
 
-        try metal_flags.appendSlice(&[_][]const u8{
-            "-Wall",
-            "-Wextra",
-            "-fno-fast-math",
-        });
+    // Mimic the CMake install rule: install to the lib directory.
+    const install = b.addInstallFile(metallib_file, "include/mlx/backend/metal/kernels/mlx.metallib");
+    install.step.dependOn(&metallib_cmd.step);
+    b.default_step.dependOn(&install.step);
 
-        if (self.metal_debug) {
-            try metal_flags.appendSlice(&[_][]const u8{
-                "-gline-tables-only",
-                "-frecord-sources",
-            });
-        }
+    const full_metal_path = b.getInstallPath(install.dir, install.dest_rel_path);
+    return full_metal_path;
+}
 
-        // Add version-specific includes
-        const version_include = self.getVersionIncludes();
-        try metal_flags.appendSlice(&[_][]const u8{
-            "-I",
-            version_include,
-        });
+fn getVersionIncludes(metal_version: u32) []const u8 {
+    return if (metal_version >= 310)
+        "mlx/backend/metal/kernels/metal_3_1"
+    else
+        "mlx/backend/metal/kernels/metal_3_0";
+}
 
-        // Add base headers as dependencies
-        var all_deps = std.ArrayList([]const u8).init(self.b.allocator);
-        defer all_deps.deinit();
-        try all_deps.appendSlice(deps);
-        try all_deps.appendSlice(&base_headers);
+fn determineMetalVersion(allocator: std.mem.Allocator) u32 {
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{
+            "zsh",
+            "-c",
+            "echo \"__METAL_VERSION__\" | xcrun -sdk macosx metal -E -x metal -P - | tail -1",
+        },
+    }) catch |err| {
+        std.debug.panic("Failed to get Metal version: {s}", .{@errorName(err)});
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
-        const air_path = try std.fmt.allocPrint(
-            self.b.allocator,
-            "{s}/{s}.air",
-            .{ self.metal_path, name },
-        );
-        defer self.b.allocator.free(air_path);
+    const version_str = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
 
-        // Create metal compilation command
-        const metal_cmd = self.b.addSystemCommand(&[_][]const u8{
-            "xcrun",
-            "-sdk",
-            "macosx",
-            "metal",
-        });
+    return std.fmt.parseInt(u32, version_str, 10) catch |err| {
+        std.debug.panic("Failed to parse Metal version '{s}': {s}", .{ version_str, @errorName(err) });
+    };
+}
 
-        metal_cmd.addArgs(metal_flags.items);
+fn build_jit_sources(b: *std.Build, lib: *std.Build.Step.Compile, og_mlx: *std.Build.Dependency, options: BuildOptions) !void {
+    try make_jit_source(b, lib, og_mlx, "utils");
+    try make_jit_source(b, lib, og_mlx, "unary_ops");
+    try make_jit_source(b, lib, og_mlx, "binary_ops");
+    try make_jit_source(b, lib, og_mlx, "ternary_ops");
+    try make_jit_source(b, lib, og_mlx, "reduce_utils");
+    try make_jit_source(b, lib, og_mlx, "scatter");
+    try make_jit_source(b, lib, og_mlx, "gather");
+    try make_jit_source(b, lib, og_mlx, "hadamard");
 
-        metal_cmd.addArg("-c");
-        metal_cmd.addFileArg(self.b.path(self.b.fmt("{s}.metal", .{name})));
-        metal_cmd.addArg("-o");
-        metal_cmd.addFileArg(self.b.path(air_path));
-
-        // Add all dependencies including base headers
-        for (all_deps.items) |dep| {
-            metal_cmd.addArg("-I");
-            metal_cmd.addFileArg(self.b.path(dep));
-        }
-
-        // Add STEEL headers to deps when appropriate
-        if (std.mem.startsWith(u8, name, "steel/")) {
-            try metal_flags.appendSlice(&steel_headers);
-        }
+    if (options.metal_jit) {
+        try make_jit_source(b, lib, og_mlx, "arange");
+        try make_jit_source(b, lib, og_mlx, "copy");
+        try make_jit_source(b, lib, og_mlx, "unary");
+        try make_jit_source(b, lib, og_mlx, "binary");
+        try make_jit_source(b, lib, og_mlx, "binary_two");
+        try make_jit_source(b, lib, og_mlx, "fft");
+        try make_jit_source(b, lib, og_mlx, "ternary");
+        try make_jit_source(b, lib, og_mlx, "softmax");
+        try make_jit_source(b, lib, og_mlx, "scan");
+        try make_jit_source(b, lib, og_mlx, "sort");
+        try make_jit_source(b, lib, og_mlx, "reduce");
+        try make_jit_source(b, lib, og_mlx, "steel/gemm/gemm");
+        try make_jit_source(b, lib, og_mlx, "steel/gemm/kernels/steel_gemm_fused");
+        try make_jit_source(b, lib, og_mlx, "steel/gemm/kernels/steel_gemm_masked");
+        try make_jit_source(b, lib, og_mlx, "steel/gemm/kernels/steel_gemm_splitk");
+        try make_jit_source(b, lib, og_mlx, "steel/conv/kernels/steel_conv");
+        try make_jit_source(b, lib, og_mlx, "steel/conv/kernels/steel_conv_general");
+        try make_jit_source(b, lib, og_mlx, "quantized");
+        try make_jit_source(b, lib, og_mlx, "gemv_masked");
     }
+}
 
-    fn buildMetallib(self: *const MetalKernelBuilder) !void {
-        const metallib_path = try std.fmt.allocPrint(
-            self.b.allocator,
-            "{s}/mlx.metallib",
-            .{self.metal_path},
-        );
-        defer self.b.allocator.free(metallib_path);
+fn make_jit_source(b: *std.Build, lib: *std.Build.Step.Compile, og_mlx: *std.Build.Dependency, comptime name: []const u8) !void {
+    const wf = b.addWriteFiles();
 
-        // Create metallib command
-        const metallib_cmd = self.b.addSystemCommand(&[_][]const u8{
-            "xcrun",
-            "-sdk",
-            "macosx",
-            "metallib",
-        });
+    const header_file_name = name ++ ".h";
+    const source_dir = b.pathJoin(&.{og_mlx.path(".").getPath(b)});
+    const jit_includes = og_mlx.path("mlx/backend/metal/kernels/jit").getPath(b);
+    const headerPath = b.pathJoin(&.{ og_mlx.path("mlx/backend/metal/kernels").getPath(b), header_file_name });
 
-        // Add all .air files
-        for (air_files) |air| {
-            metallib_cmd.addFileArg(self.b.path(air));
-        }
+    // kinda rouge to discard the errros but this is also done in the original MLX repo
+    const commandStr = try std.fmt.allocPrint(b.allocator, "{s} -I{s} -I{s} -DMLX_METAL_JIT -E -P {s} 2>/dev/null || true", .{
+        // TODO don't hard code this cc compiler
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/cc",
+        source_dir,
+        jit_includes,
+        headerPath,
+    });
+    defer b.allocator.free(commandStr);
 
-        metallib_cmd.addArg("-o");
-        metallib_cmd.addFileArg(self.b.path(metallib_path));
-    }
+    const preprocess = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "-c",
+        commandStr,
+    });
 
-    fn buildJitKernels(self: *const MetalKernelBuilder) !void {
-        // Add JIT-specific kernels when MLX_METAL_JIT is enabled
-        if (self.metal_jit) {
-            try self.buildKernel("arange", &[_][]const u8{});
-            try self.buildKernel("copy", &[_][]const u8{});
-            try self.buildKernel("unary", &[_][]const u8{});
-            try self.buildKernel("binary", &[_][]const u8{});
-            try self.buildKernel("binary_two", &[_][]const u8{});
-            try self.buildKernel("fft", &[_][]const u8{ "kernels/fft/radix.h", "kernels/fft/readwrite.h" });
-            try self.buildKernel("ternary", &[_][]const u8{});
-            try self.buildKernel("softmax", &[_][]const u8{});
-            try self.buildKernel("scan", &[_][]const u8{});
-            try self.buildKernel("sort", &[_][]const u8{});
-            try self.buildKernel("reduce", &[_][]const u8{
-                "kernels/reduction/reduce_all.h",
-                "kernels/reduction/reduce_col.h",
-                "kernels/reduction/reduce_row.h",
-                "kernels/reduction/reduce_init.h",
-            });
-            try self.buildKernel("steel/gemm/gemm", &[_][]const u8{
-                "kernels/steel/utils.h",
-                "kernels/steel/gemm/loader.h",
-                "kernels/steel/gemm/mma.h",
-                "kernels/steel/gemm/params.h",
-                "kernels/steel/gemm/transforms.h",
-            });
-            try self.buildKernel("steel/gemm/kernels/steel_gemm_fused", &[_][]const u8{});
-            try self.buildKernel("steel/gemm/kernels/steel_gemm_masked", &[_][]const u8{"kernels/steel/defines.h"});
-            try self.buildKernel("steel/gemm/kernels/steel_gemm_splitk", &[_][]const u8{});
-            try self.buildKernel("steel/conv/conv", &[_][]const u8{
-                "kernels/steel/utils.h",
-                "kernels/steel/defines.h",
-                "kernels/steel/gemm/mma.h",
-                "kernels/steel/gemm/transforms.h",
-                "kernels/steel/conv/params.h",
-                "kernels/steel/conv/loader.h",
-                "kernels/steel/conv/loaders/loader_channel_l.h",
-                "kernels/steel/conv/loaders/loader_channel_n.h",
-            });
-            try self.buildKernel("steel/conv/kernels/steel_conv", &[_][]const u8{});
-            try self.buildKernel("steel/conv/kernels/steel_conv_general", &[_][]const u8{
-                "kernels/steel/defines.h",
-                "kernels/steel/conv/loaders/loader_general.h",
-            });
-            try self.buildKernel("quantized", &[_][]const u8{});
-            try self.buildKernel("gemv_masked", &[_][]const u8{});
-        }
-    }
+    const std_out_path = preprocess.captureStdOut();
 
-    fn buildNonJitKernels(self: *const MetalKernelBuilder) !void {
-        // Add these kernels when MLX_METAL_JIT is disabled
-        try self.buildKernel("arg_reduce", &[_][]const u8{});
-        try self.buildKernel("conv", &[_][]const u8{"steel/conv/params.h"});
-        try self.buildKernel("gemv", &[_][]const u8{"steel/utils.h"});
-        try self.buildKernel("layer_norm", &[_][]const u8{});
-        try self.buildKernel("random", &[_][]const u8{});
-        try self.buildKernel("rms_norm", &[_][]const u8{});
-        try self.buildKernel("rope", &[_][]const u8{});
-        try self.buildKernel("scaled_dot_product_attention", &[_][]const u8{"sdpa_vector.h"});
-        try self.buildKernel("steel/attn/kernels/steel_attention", &steel_attn_header);
-    }
+    const read_step = ReadFileStep.create(b, std_out_path);
+    read_step.step.dependOn(&preprocess.step);
 
-    fn buildCoreKernels(self: *const MetalKernelBuilder) !void {
-        // Build core Metal kernels
-        try self.buildKernel("utils", &[_][]const u8{
-            "kernels/jit/bf16.h",
-            "kernels/metal_3_0/bf16.h",
-            "kernels/metal_3_1/bf16.h",
-            "kernels/bf16_math.h",
-            "kernels/complex.h",
-            "kernels/defines.h",
-        });
-        try self.buildKernel("unary_ops", &[_][]const u8{ "kernels/erf.h", "kernels/expm1f.h" });
-        try self.buildKernel("binary_ops", &[_][]const u8{});
-        try self.buildKernel("ternary_ops", &[_][]const u8{});
-        try self.buildKernel("reduce_utils", &[_][]const u8{ "kernels/atomic.h", "kernels/reduction/ops.h" });
-        try self.buildKernel("scatter", &[_][]const u8{"kernels/indexing.h"});
-        try self.buildKernel("gather", &[_][]const u8{"kernels/indexing.h"});
-        try self.buildKernel("hadamard", &[_][]const u8{});
-    }
+    const gen_step = GenerateMetalJitPreambleStep.create(name, b, read_step, wf, lib);
+    gen_step.step.dependOn(&read_step.step);
 
-    fn getVersionIncludes(self: *const MetalKernelBuilder) []const u8 {
-        return if (self.metal_version >= 310)
-            "upstream/mlx/backend/metal/kernels/metal_3_1"
-        else
-            "upstream/mlx/backend/metal/kernels/metal_3_0";
-    }
-};
+    // IMPORTANT: Make WriteFile step depend on generate step
+    wf.step.dependOn(&gen_step.step);
 
-const steel_headers = [_][]const u8{
-    "steel/defines.h",
-    "steel/utils.h",
-    "steel/conv/conv.h",
-    "steel/conv/loader.h",
-    "steel/conv/loaders/loader_channel_l.h",
-    "steel/conv/loaders/loader_channel_n.h",
-    "steel/conv/loaders/loader_general.h",
-    "steel/conv/kernels/steel_conv.h",
-    "steel/conv/kernels/steel_conv_general.h",
-    "steel/gemm/gemm.h",
-    "steel/gemm/mma.h",
-    "steel/gemm/loader.h",
-    "steel/gemm/transforms.h",
-    "steel/gemm/kernels/steel_gemm_fused.h",
-    "steel/gemm/kernels/steel_gemm_masked.h",
-    "steel/gemm/kernels/steel_gemm_splitk.h",
-    "steel/utils/type_traits.h",
-    "steel/utils/integral_constant.h",
-};
+    const add_step = AddMetalFileStep.create(b, lib, gen_step);
+    add_step.step.dependOn(&wf.step);
 
-const steel_attn_header = [_][]const u8{
-    "steel/defines.h",
-    "steel/utils.h",
-    "steel/gemm/gemm.h",
-    "steel/gemm/mma.h",
-    "steel/gemm/loader.h",
-    "steel/gemm/transforms.h",
-    "steel/utils/type_traits.h",
-    "steel/utils/integral_constant.h",
-    "steel/attn/attn.h",
-    "steel/attn/loader.h",
-    "steel/attn/mma.h",
-    "steel/attn/params.h",
-    "steel/attn/transforms.h",
-    "steel/attn/kernels/steel_attention.h",
-};
-
-const base_headers = [_][]const u8{
-    "metal_3_1/bf16.h",
-    "metal_3_0/bf16.h",
-    "bf16_math.h",
-    "complex.h",
-    "defines.h",
-    "expm1f.h",
-    "utils.h",
-};
+    lib.step.dependOn(&add_step.step);
+}
 
 ///////////////////////////////////////////
 /// Build deps like gguf, safetensors etc.
 //////////////////////////////////////////
 
-// TODO these are now kinda written as if they have build.zig files, which is not the case
-// create a more unified and foolproof way to download and build the correct stuff
 const Dependencies = struct {
     fmt: *std.Build.Dependency,
     doctest: ?*std.Build.Dependency,
     json: ?*std.Build.Dependency,
     gguflib: ?*std.Build.Dependency,
-    // metal_cpp: ?*std.Build.Dependency = null,
+    metal_cpp: ?*std.Build.Dependency = null,
     // nanobind: ?*std.Build.Dependency = null, this is to build python binding add back later
 
     fn init(b: *std.Build, options: BuildOptions, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) !Dependencies {
@@ -586,12 +531,6 @@ const Dependencies = struct {
             .target = target,
             .optimize = optimize,
         });
-
-        // TODO fmt moved down, maybe okay to be there
-        // const fmt = b.dependency("fmt", .{
-        //     .url = "git+https://github.com/fmtlib/fmt.git#10.2.1",
-        //     .hash = "1220f6c1f5b8a20f51b2d3534296e2e1b910c3a1f5c8c08f9a8e8523a9c7c5e4d8c8", // You'll need to update this hash
-        // });
 
         const doctest = if (options.build_tests) b.dependency("doctest", .{
             .target = target,
@@ -608,11 +547,10 @@ const Dependencies = struct {
             .optimize = optimize,
         }) else null;
 
-        // Initialize Metal C++ if needed
-        // const metal_cpp = if (options.build_metal) b.dependency("metal_cpp", .{
-        //     .url = "https://developer.apple.com/metal/cpp/files/metal-cpp_macOS15_iOS18-beta.zip",
-        //     .hash = "...", // Add proper hash
-        // }) else null;
+        const metal_cpp = if (options.build_metal) b.dependency("metal-cpp", .{
+            .target = target,
+            .optimize = optimize,
+        }) else null;
 
         // Initialize nanobind if Python bindings are enabled
         // const nanobind = if (options.build_python_bindings) b.dependency("nanobind", .{
@@ -625,7 +563,7 @@ const Dependencies = struct {
             .doctest = doctest,
             .json = json,
             .gguflib = gguflib,
-            // .metal_cpp = metal_cpp,
+            .metal_cpp = metal_cpp,
             // .nanobind = nanobind,
         };
     }
@@ -701,6 +639,81 @@ const ReadFileStep = struct {
     }
 };
 
+const GenerateMetalJitPreambleStep = struct {
+    const Self = @This();
+
+    name: []const u8,
+    step: std.Build.Step,
+    b: *std.Build,
+    read_step: *ReadFileStep,
+    wf: *std.Build.Step.WriteFile,
+    output_path: std.Build.LazyPath,
+    lib: *std.Build.Step.Compile,
+
+    pub fn create(
+        name: []const u8,
+        b: *std.Build,
+        read_step: *ReadFileStep,
+        wf: *std.Build.Step.WriteFile,
+        lib: *std.Build.Step.Compile,
+    ) *GenerateMetalJitPreambleStep {
+        const new = b.allocator.create(Self) catch unreachable;
+
+        new.* = .{
+            .name = name,
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "generate_metal_jit_preamble",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .b = b,
+            .read_step = read_step,
+            .wf = wf,
+            .output_path = undefined, // Will be set in make()
+            .lib = lib,
+        };
+
+        return new;
+    }
+
+    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
+        _ = prog_node;
+        const self: *Self = @fieldParentPtr("step", step);
+
+        var content = std.ArrayList(u8).init(self.b.allocator);
+        defer content.deinit();
+
+        try content.appendSlice(
+            \\namespace mlx::core::metal {
+            \\
+            \\
+        );
+
+        const line = try std.fmt.allocPrint(
+            self.b.allocator,
+            "const char* {s} () {{\nreturn R\"preamble(\n",
+            .{self.name},
+        );
+
+        try content.appendSlice(line);
+
+        try content.appendSlice(self.read_step.contents);
+
+        try content.appendSlice(
+            \\)preamble";
+            \\}
+            \\
+            \\} // namespace mlx::core::metal
+            \\
+        );
+
+        // The output path is now in the .zig_cache, which may or may not be okay
+        const output_path = try std.fmt.allocPrint(self.b.allocator, "mlx/backend/metal/jit/{s}.cpp", .{self.name});
+        self.output_path = self.wf.add(output_path, content.items);
+    }
+};
+
 const GeneratePreambleStep = struct {
     const Self = @This();
 
@@ -773,6 +786,7 @@ const GeneratePreambleStep = struct {
             \\
         );
 
+        // The output path is now in the .zig_cache, which may or may not be okay
         self.output_path = self.wf.add("mlx/backend/common/compiled_preamble.cpp", content.items);
     }
 };
@@ -810,6 +824,39 @@ const AddFileStep = struct {
     }
 };
 
+const AddMetalFileStep = struct {
+    const Self = @This();
+
+    step: std.Build.Step,
+    b: *std.Build,
+    gen_step: *GenerateMetalJitPreambleStep,
+    lib: *std.Build.Step.Compile,
+
+    fn create(b: *std.Build, lib: *std.Build.Step.Compile, gen_step: *GenerateMetalJitPreambleStep) *Self {
+        const new = b.allocator.create(Self) catch unreachable;
+        new.* = .{
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "add_file",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .b = b,
+            .lib = lib,
+            .gen_step = gen_step,
+        };
+        return new;
+    }
+
+    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
+        _ = prog_node;
+        const self: *Self = @fieldParentPtr("step", step);
+
+        const preamble_cpp_file = self.gen_step.output_path;
+        self.lib.addCSourceFile(.{ .file = preamble_cpp_file, .flags = &CPP_FLAGS });
+    }
+};
+
 ////////////////////////////
 /// util functions
 ////////////////////////////
@@ -823,9 +870,6 @@ fn checkMacOSSDKVersion() !f32 {
     defer std.heap.page_allocator.free(result.stderr);
 
     const version = try std.fmt.parseFloat(f32, std.mem.trim(u8, result.stdout, " \n\r"));
-    if (version < 14.0) {
-        @panic("MLX requires macOS SDK >= 14.0 to be built with MLX_BUILD_METAL=ON");
-    }
     return version;
 }
 
@@ -945,13 +989,6 @@ const metal_sources = [_][]const u8{
     "backend/metal/utils.cpp",
 };
 
-// TODO I probably don't need to have the .air files like this, should be able to grab the list by something else
-const air_files = [_][]const u8{
-    "arg_reduce.air",
-    "conv.air",
-    // ... other .air files ...
-};
-
 const no_metal_sources = [_][]const u8{
     "backend/no_metal/allocator.cpp",
     "backend/no_metal/event.cpp",
@@ -988,9 +1025,6 @@ const common_sources = [_][]const u8{
     "backend/common/inverse.cpp",
     "backend/common/cholesky.cpp",
     "backend/common/utils.cpp",
-
-    // TODO here should come compiled preamble, but not like this
-    // "zig-out/include/mlx/backend/common/compiled_preamble.cpp",
 };
 
 const no_cpu_sources = [_][]const u8{

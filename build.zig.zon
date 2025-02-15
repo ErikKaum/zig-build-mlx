@@ -29,6 +29,10 @@
             .url = "https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.tar.gz",
             .hash = "12203ada5de99b48676019c52ad8ea06a5cae74319c5f1fe5aaf020ec9636872f423",
         },
+        .@"metal-cpp" = .{
+            .url = "https://developer.apple.com/metal/cpp/files/metal-cpp_macOS15_iOS18-beta.zip",
+            .hash = "122043392ff577755d76e16926ba8bc23903a370abab0c8fe3c1fb584e66dbc7e524",
+        },
     },
 
     .paths = .{
