@@ -381,11 +381,16 @@ fn buildMetallib(b: *std.Build, air_files: []std.Build.LazyPath) ![]const u8 {
     const metallib_file = metallib_cmd.addOutputFileArg("mlx.metallib");
 
     // Mimic the CMake install rule: install to the lib directory.
-    const install = b.addInstallFile(metallib_file, "include/mlx/backend/metal/kernels/mlx.metallib");
+    const install = b.addInstallFile(metallib_file, "lib/mlx.metallib");
     install.step.dependOn(&metallib_cmd.step);
     b.default_step.dependOn(&install.step);
 
-    const full_metal_path = b.getInstallPath(install.dir, install.dest_rel_path);
+    const full_metal_path = try std.fmt.allocPrint(b.allocator, "{s}/lib/mlx.metallib", .{
+        b.install_prefix,
+    });
+
+    // const full_metal_path = b.dep_prefix ++ "lib/mlx.metallib";
+    // const full_metal_path = b.getInstallPath(install.dir, install.dest_rel_path);
     return full_metal_path;
 }
 
