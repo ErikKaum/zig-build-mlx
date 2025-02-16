@@ -63,10 +63,7 @@ pub fn build(b: *std.Build) !void {
     // const optimize = b.standardOptimizeOption(.{});
     const optimize = std.builtin.OptimizeMode.ReleaseFast;
 
-    // Parse build options using the new fromOptions helper
     const options = BuildOptions.fromOptions(b);
-
-    // Initialize dependencies
     const deps = try Dependencies.init(b, options, target, optimize);
 
     // Original MLX, let's not call it "mlx" since that could be easy to confuse with the mlx lib we're now building
@@ -191,7 +188,7 @@ pub fn build(b: *std.Build) !void {
         // /Users/erikkaum/.cache/zig/p/1220d24e8ea45a42f1e5b4928f0991cb2d15fb502e602d57c1551cca4f702398e7f0/mlx/backend/metal/device.cpp:28:56
         lib.addCSourceFiles(.{ .root = og_mlx.path("mlx"), .files = &metal_sources, .flags = &CPP_FLAGS });
 
-        const metal_lib_path_raw = try runKernelBuild(b, og_mlx, options);
+        const metal_lib_path_raw = try buildAllKernels(b, og_mlx, options);
         const metal_lib_path = try std.fmt.allocPrint(b.allocator, "\"{s}\"", .{metal_lib_path_raw});
         lib.defineCMacro("METAL_PATH", metal_lib_path);
 
@@ -231,6 +228,7 @@ pub fn build(b: *std.Build) !void {
         }
 
         // Add default primitives when not using Accelerate
+        // TODO check if !is_darwin flag is correct
         if (options.build_cpu and !is_darwin) {
             lib.addCSourceFile(.{
                 .file = b.path("upstream/mlx/mlx/backend/common/default_primitives.cpp"),
@@ -242,6 +240,7 @@ pub fn build(b: *std.Build) !void {
     }
 
     // Link with system libraries
+    // TODO I think this should be conditional on !options.build_metal as well
     if (is_darwin) {
         if (is_arm) {
             lib.linkFramework("Accelerate");
@@ -285,40 +284,19 @@ pub fn build(b: *std.Build) !void {
 /// Everything to build metal kernels
 ///////////////////////////////////////
 
-fn runKernelBuild(b: *std.Build, og_mlx: *std.Build.Dependency, options: BuildOptions) ![]const u8 {
+fn buildAllKernels(b: *std.Build, og_mlx: *std.Build.Dependency, options: BuildOptions) ![]const u8 {
     var airFiles = std.ArrayList(std.Build.LazyPath).init(b.allocator);
     defer airFiles.deinit();
 
     // always build
-    try airFiles.append(try buildKernel(b, "arg_reduce", og_mlx));
-    try airFiles.append(try buildKernel(b, "conv", og_mlx));
-    try airFiles.append(try buildKernel(b, "gemv", og_mlx));
-    try airFiles.append(try buildKernel(b, "layer_norm", og_mlx));
-    try airFiles.append(try buildKernel(b, "random", og_mlx));
-    try airFiles.append(try buildKernel(b, "rms_norm", og_mlx));
-    try airFiles.append(try buildKernel(b, "rope", og_mlx));
-    try airFiles.append(try buildKernel(b, "scaled_dot_product_attention", og_mlx));
-    try airFiles.append(try buildKernel(b, "steel/attn/kernels/steel_attention", og_mlx));
+    inline for (default_kernels) |kernel| {
+        try airFiles.append(try buildKernel(b, kernel, og_mlx));
+    }
 
     if (!options.metal_jit) {
-        try airFiles.append(try buildKernel(b, "arange", og_mlx));
-        try airFiles.append(try buildKernel(b, "binary", og_mlx));
-        try airFiles.append(try buildKernel(b, "binary_two", og_mlx));
-        try airFiles.append(try buildKernel(b, "copy", og_mlx));
-        try airFiles.append(try buildKernel(b, "fft", og_mlx));
-        try airFiles.append(try buildKernel(b, "reduce", og_mlx));
-        try airFiles.append(try buildKernel(b, "quantized", og_mlx));
-        try airFiles.append(try buildKernel(b, "scan", og_mlx));
-        try airFiles.append(try buildKernel(b, "softmax", og_mlx));
-        try airFiles.append(try buildKernel(b, "sort", og_mlx));
-        try airFiles.append(try buildKernel(b, "ternary", og_mlx));
-        try airFiles.append(try buildKernel(b, "unary", og_mlx));
-        try airFiles.append(try buildKernel(b, "steel/conv/kernels/steel_conv", og_mlx));
-        try airFiles.append(try buildKernel(b, "steel/conv/kernels/steel_conv_general", og_mlx));
-        try airFiles.append(try buildKernel(b, "steel/gemm/kernels/steel_gemm_fused", og_mlx));
-        try airFiles.append(try buildKernel(b, "steel/gemm/kernels/steel_gemm_masked", og_mlx));
-        try airFiles.append(try buildKernel(b, "steel/gemm/kernels/steel_gemm_splitk", og_mlx));
-        try airFiles.append(try buildKernel(b, "gemv_masked", og_mlx));
+        inline for (jit_kernels) |kernel| {
+            try airFiles.append(try buildKernel(b, kernel, og_mlx));
+        }
     }
 
     // finally build the metallib which depends on all the air files
@@ -375,13 +353,9 @@ fn buildKernel(b: *std.Build, comptime rel_path: []const u8, og_mlx: *std.Build.
     const out_file_name = name ++ ".air";
     const output_path = metal_cmd.addOutputFileArg(out_file_name);
 
-    // ---------------------------------------------------------------------
-
     const dest_rel_path = "include/mlx/backend/metal/kernels/" ++ name ++ ".air";
     const metal_install = b.addInstallFile(output_path, dest_rel_path);
     metal_install.step.dependOn(&metal_cmd.step);
-
-    // ---------------------------------------------------------------------
 
     b.default_step.dependOn(&metal_install.step);
 
@@ -412,64 +386,15 @@ fn buildMetallib(b: *std.Build, air_files: []std.Build.LazyPath) ![]const u8 {
     return full_metal_path;
 }
 
-fn getVersionIncludes(metal_version: u32) []const u8 {
-    return if (metal_version >= 310)
-        "mlx/backend/metal/kernels/metal_3_1"
-    else
-        "mlx/backend/metal/kernels/metal_3_0";
-}
-
-fn determineMetalVersion(allocator: std.mem.Allocator) u32 {
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &[_][]const u8{
-            "zsh",
-            "-c",
-            "echo \"__METAL_VERSION__\" | xcrun -sdk macosx metal -E -x metal -P - | tail -1",
-        },
-    }) catch |err| {
-        std.debug.panic("Failed to get Metal version: {s}", .{@errorName(err)});
-    };
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    const version_str = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
-
-    return std.fmt.parseInt(u32, version_str, 10) catch |err| {
-        std.debug.panic("Failed to parse Metal version '{s}': {s}", .{ version_str, @errorName(err) });
-    };
-}
-
 fn build_jit_sources(b: *std.Build, lib: *std.Build.Step.Compile, og_mlx: *std.Build.Dependency, options: BuildOptions) !void {
-    try make_jit_source(b, lib, og_mlx, "utils");
-    try make_jit_source(b, lib, og_mlx, "unary_ops");
-    try make_jit_source(b, lib, og_mlx, "binary_ops");
-    try make_jit_source(b, lib, og_mlx, "ternary_ops");
-    try make_jit_source(b, lib, og_mlx, "reduce_utils");
-    try make_jit_source(b, lib, og_mlx, "scatter");
-    try make_jit_source(b, lib, og_mlx, "gather");
-    try make_jit_source(b, lib, og_mlx, "hadamard");
+    inline for (default_jit_sources) |source| {
+        try make_jit_source(b, lib, og_mlx, source);
+    }
 
     if (options.metal_jit) {
-        try make_jit_source(b, lib, og_mlx, "arange");
-        try make_jit_source(b, lib, og_mlx, "copy");
-        try make_jit_source(b, lib, og_mlx, "unary");
-        try make_jit_source(b, lib, og_mlx, "binary");
-        try make_jit_source(b, lib, og_mlx, "binary_two");
-        try make_jit_source(b, lib, og_mlx, "fft");
-        try make_jit_source(b, lib, og_mlx, "ternary");
-        try make_jit_source(b, lib, og_mlx, "softmax");
-        try make_jit_source(b, lib, og_mlx, "scan");
-        try make_jit_source(b, lib, og_mlx, "sort");
-        try make_jit_source(b, lib, og_mlx, "reduce");
-        try make_jit_source(b, lib, og_mlx, "steel/gemm/gemm");
-        try make_jit_source(b, lib, og_mlx, "steel/gemm/kernels/steel_gemm_fused");
-        try make_jit_source(b, lib, og_mlx, "steel/gemm/kernels/steel_gemm_masked");
-        try make_jit_source(b, lib, og_mlx, "steel/gemm/kernels/steel_gemm_splitk");
-        try make_jit_source(b, lib, og_mlx, "steel/conv/kernels/steel_conv");
-        try make_jit_source(b, lib, og_mlx, "steel/conv/kernels/steel_conv_general");
-        try make_jit_source(b, lib, og_mlx, "quantized");
-        try make_jit_source(b, lib, og_mlx, "gemv_masked");
+        inline for (optional_jit_sources) |source| {
+            try make_jit_source(b, lib, og_mlx, source);
+        }
     }
 }
 
@@ -483,8 +408,8 @@ fn make_jit_source(b: *std.Build, lib: *std.Build.Step.Compile, og_mlx: *std.Bui
 
     // kinda rouge to discard the errros but this is also done in the original MLX repo
     const commandStr = try std.fmt.allocPrint(b.allocator, "{s} -I{s} -I{s} -DMLX_METAL_JIT -E -P {s} 2>/dev/null || true", .{
-        // TODO don't hard code this cc compiler
-        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/cc",
+        // TODO don't hard code this cc compiler and fix clang++: warning: treating 'c-header' input as 'c++-header' when in C++ mode, this behavior is deprecated [-Wdeprecated]
+        "c++",
         source_dir,
         jit_includes,
         headerPath,
@@ -502,17 +427,250 @@ fn make_jit_source(b: *std.Build, lib: *std.Build.Step.Compile, og_mlx: *std.Bui
     const read_step = ReadFileStep.create(b, std_out_path);
     read_step.step.dependOn(&preprocess.step);
 
-    const gen_step = GenerateMetalJitPreambleStep.create(name, b, read_step, wf, lib);
+    // the is_darwin flag is hard coded since the metal preamble doesn't use it
+    const gen_step = GeneratePreambleStep.create(name, b, read_step, false, wf, lib, MetalOrCommon.metal);
     gen_step.step.dependOn(&read_step.step);
 
     // IMPORTANT: Make WriteFile step depend on generate step
     wf.step.dependOn(&gen_step.step);
 
-    const add_step = AddMetalFileStep.create(b, lib, gen_step);
+    const add_step = AddFileStep.create(b, lib, gen_step);
     add_step.step.dependOn(&wf.step);
 
     lib.step.dependOn(&add_step.step);
 }
+
+/////////////////////////////////////////
+/// Build Preamble
+///////////////////////////////////////
+
+fn build_preamble(b: *std.Build, lib: *std.Build.Step.Compile, og_mlx: *std.Build.Dependency, is_darwin: bool) !void {
+    const wf = b.addWriteFiles();
+
+    const preprocess = b.addSystemCommand(&[_][]const u8{
+        // TODO don't hard code this cc compiler and fix clang++: warning: treating 'c-header' input as 'c++-header' when in C++ mode, this behavior is deprecated [-Wdeprecated]
+        "c++",
+        "-I",
+        b.pathJoin(&.{og_mlx.path(".").getPath(b)}),
+        "-E",
+        b.pathJoin(&.{ og_mlx.path("mlx").getPath(b), "backend", "common", "compiled_preamble.h" }),
+    });
+
+    const std_out_path = preprocess.captureStdOut();
+
+    const read_step = ReadFileStep.create(b, std_out_path);
+    read_step.step.dependOn(&preprocess.step);
+
+    // the name can be hardcoded since it only creates one file, don't hardcode if this changes
+    const gen_step = GeneratePreambleStep.create("compiled_preamble", b, read_step, is_darwin, wf, lib, MetalOrCommon.common);
+    gen_step.step.dependOn(&read_step.step);
+
+    // IMPORTANT: Make WriteFile step depend on generate step
+    wf.step.dependOn(&gen_step.step);
+
+    const add_step = AddFileStep.create(b, lib, gen_step);
+    add_step.step.dependOn(&wf.step);
+
+    lib.step.dependOn(&add_step.step);
+}
+
+/////////////////////////////////////////
+/// Custom Steps
+///////////////////////////////////////
+
+const ReadFileStep = struct {
+    const Self = @This();
+
+    step: std.Build.Step,
+    b: *std.Build,
+    path: std.Build.LazyPath,
+    contents: []const u8 = "",
+
+    fn create(b: *std.Build, path: std.Build.LazyPath) *Self {
+        const new = b.allocator.create(Self) catch unreachable;
+        new.* = .{
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "read_file",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .path = path,
+            .b = b,
+        };
+        return new;
+    }
+
+    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
+        _ = prog_node;
+        const self: *Self = @fieldParentPtr("step", step);
+        const path = self.path.getPath(self.b);
+
+        self.contents = try std.fs.cwd().readFileAlloc(
+            self.b.allocator,
+            path,
+            std.math.maxInt(usize),
+        );
+    }
+};
+
+const MetalOrCommon = enum { common, metal };
+
+const GeneratePreambleStep = struct {
+    const Self = @This();
+
+    name: []const u8,
+    step: std.Build.Step,
+    b: *std.Build,
+    read_step: *ReadFileStep,
+    is_darwin: bool,
+    wf: *std.Build.Step.WriteFile,
+    output_path: std.Build.LazyPath,
+    lib: *std.Build.Step.Compile,
+    which: MetalOrCommon,
+
+    pub fn create(
+        name: []const u8,
+        b: *std.Build,
+        read_step: *ReadFileStep,
+        is_darwin: bool,
+        wf: *std.Build.Step.WriteFile,
+        lib: *std.Build.Step.Compile,
+        which: MetalOrCommon,
+    ) *GeneratePreambleStep {
+        const new = b.allocator.create(Self) catch unreachable;
+
+        new.* = .{
+            .name = name, // only used for metal
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "generate_preamble",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .b = b,
+            .read_step = read_step,
+            .is_darwin = is_darwin, //only used for common
+            .wf = wf,
+            .output_path = undefined, // Will be set in the respective make functions
+            .lib = lib,
+            .which = which,
+        };
+
+        return new;
+    }
+
+    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
+        _ = prog_node;
+        const self: *Self = @fieldParentPtr("step", step);
+
+        switch (self.which) {
+            MetalOrCommon.common => try make_common_step(self),
+            MetalOrCommon.metal => try make_jit_step(self),
+        }
+    }
+
+    fn make_common_step(self: *GeneratePreambleStep) anyerror!void {
+        var content = std.ArrayList(u8).init(self.b.allocator);
+        defer content.deinit();
+
+        try content.appendSlice(
+            \\const char* get_kernel_preamble() {
+            \\return R"preamble(
+            \\
+        );
+
+        if (self.is_darwin) {
+            try content.appendSlice(
+                \\#include <cmath>
+                \\#include <complex>
+                \\#include <cstdint>
+                \\#include <vector>
+                \\
+            );
+        }
+
+        try content.appendSlice(self.read_step.contents);
+
+        try content.appendSlice(
+            \\
+            \\using namespace mlx::core;
+            \\using namespace mlx::core::detail;
+            \\)preamble";
+            \\}
+            \\
+        );
+
+        // The output path is now in the .zig_cache, which may or may not be okay
+        self.output_path = self.wf.add("mlx/backend/common/compiled_preamble.cpp", content.items);
+    }
+
+    fn make_jit_step(self: *GeneratePreambleStep) anyerror!void {
+        var content = std.ArrayList(u8).init(self.b.allocator);
+        defer content.deinit();
+
+        try content.appendSlice(
+            \\namespace mlx::core::metal {
+            \\
+            \\
+        );
+
+        const line = try std.fmt.allocPrint(
+            self.b.allocator,
+            "const char* {s} () {{\nreturn R\"preamble(\n",
+            .{self.name},
+        );
+
+        try content.appendSlice(line);
+
+        try content.appendSlice(self.read_step.contents);
+
+        try content.appendSlice(
+            \\)preamble";
+            \\}
+            \\
+            \\} // namespace mlx::core::metal
+            \\
+        );
+
+        // The output path is now in the .zig_cache, which may or may not be okay
+        const output_path = try std.fmt.allocPrint(self.b.allocator, "mlx/backend/metal/jit/{s}.cpp", .{self.name});
+        self.output_path = self.wf.add(output_path, content.items);
+    }
+};
+
+const AddFileStep = struct {
+    const Self = @This();
+
+    step: std.Build.Step,
+    b: *std.Build,
+    gen_step: *GeneratePreambleStep,
+    lib: *std.Build.Step.Compile,
+
+    fn create(b: *std.Build, lib: *std.Build.Step.Compile, gen_step: *GeneratePreambleStep) *Self {
+        const new = b.allocator.create(Self) catch unreachable;
+        new.* = .{
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "add_file",
+                .owner = b,
+                .makeFn = make,
+            }),
+            .b = b,
+            .lib = lib,
+            .gen_step = gen_step,
+        };
+        return new;
+    }
+
+    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
+        _ = prog_node;
+        const self: *Self = @fieldParentPtr("step", step);
+
+        const preamble_cpp_file = self.gen_step.output_path;
+        self.lib.addCSourceFile(.{ .file = preamble_cpp_file, .flags = &CPP_FLAGS });
+    }
+};
 
 ///////////////////////////////////////////
 /// Build deps like gguf, safetensors etc.
@@ -569,294 +727,6 @@ const Dependencies = struct {
     }
 };
 
-/////////////////////////////////////////
-/// Build Preamble
-///////////////////////////////////////
-
-fn build_preamble(b: *std.Build, lib: *std.Build.Step.Compile, og_mlx: *std.Build.Dependency, is_darwin: bool) !void {
-    const wf = b.addWriteFiles();
-
-    // TODO fix this warning
-    // clang++: warning: treating 'c-header' input as 'c++-header' when in C++ mode, this behavior is deprecated [-Wdeprecated]
-    const preprocess = b.addSystemCommand(&[_][]const u8{
-        "c++",
-        "-I",
-        b.pathJoin(&.{og_mlx.path(".").getPath(b)}),
-        "-E",
-        b.pathJoin(&.{ og_mlx.path("mlx").getPath(b), "backend", "common", "compiled_preamble.h" }),
-    });
-
-    const std_out_path = preprocess.captureStdOut();
-
-    const read_step = ReadFileStep.create(b, std_out_path);
-    read_step.step.dependOn(&preprocess.step);
-
-    const gen_step = GeneratePreambleStep.create(b, read_step, is_darwin, wf, lib);
-    gen_step.step.dependOn(&read_step.step);
-
-    // IMPORTANT: Make WriteFile step depend on generate step
-    wf.step.dependOn(&gen_step.step);
-
-    const add_step = AddFileStep.create(b, lib, gen_step);
-    add_step.step.dependOn(&wf.step);
-
-    lib.step.dependOn(&add_step.step);
-}
-
-const ReadFileStep = struct {
-    const Self = @This();
-
-    step: std.Build.Step,
-    b: *std.Build,
-    path: std.Build.LazyPath,
-    contents: []const u8 = "",
-
-    fn create(b: *std.Build, path: std.Build.LazyPath) *Self {
-        const new = b.allocator.create(Self) catch unreachable;
-        new.* = .{
-            .step = std.Build.Step.init(.{
-                .id = .custom,
-                .name = "read_file",
-                .owner = b,
-                .makeFn = make,
-            }),
-            .path = path,
-            .b = b,
-        };
-        return new;
-    }
-
-    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
-        _ = prog_node;
-        const self: *Self = @fieldParentPtr("step", step);
-        const path = self.path.getPath(self.b);
-
-        self.contents = try std.fs.cwd().readFileAlloc(
-            self.b.allocator,
-            path,
-            std.math.maxInt(usize),
-        );
-    }
-};
-
-const GenerateMetalJitPreambleStep = struct {
-    const Self = @This();
-
-    name: []const u8,
-    step: std.Build.Step,
-    b: *std.Build,
-    read_step: *ReadFileStep,
-    wf: *std.Build.Step.WriteFile,
-    output_path: std.Build.LazyPath,
-    lib: *std.Build.Step.Compile,
-
-    pub fn create(
-        name: []const u8,
-        b: *std.Build,
-        read_step: *ReadFileStep,
-        wf: *std.Build.Step.WriteFile,
-        lib: *std.Build.Step.Compile,
-    ) *GenerateMetalJitPreambleStep {
-        const new = b.allocator.create(Self) catch unreachable;
-
-        new.* = .{
-            .name = name,
-            .step = std.Build.Step.init(.{
-                .id = .custom,
-                .name = "generate_metal_jit_preamble",
-                .owner = b,
-                .makeFn = make,
-            }),
-            .b = b,
-            .read_step = read_step,
-            .wf = wf,
-            .output_path = undefined, // Will be set in make()
-            .lib = lib,
-        };
-
-        return new;
-    }
-
-    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
-        _ = prog_node;
-        const self: *Self = @fieldParentPtr("step", step);
-
-        var content = std.ArrayList(u8).init(self.b.allocator);
-        defer content.deinit();
-
-        try content.appendSlice(
-            \\namespace mlx::core::metal {
-            \\
-            \\
-        );
-
-        const line = try std.fmt.allocPrint(
-            self.b.allocator,
-            "const char* {s} () {{\nreturn R\"preamble(\n",
-            .{self.name},
-        );
-
-        try content.appendSlice(line);
-
-        try content.appendSlice(self.read_step.contents);
-
-        try content.appendSlice(
-            \\)preamble";
-            \\}
-            \\
-            \\} // namespace mlx::core::metal
-            \\
-        );
-
-        // The output path is now in the .zig_cache, which may or may not be okay
-        const output_path = try std.fmt.allocPrint(self.b.allocator, "mlx/backend/metal/jit/{s}.cpp", .{self.name});
-        self.output_path = self.wf.add(output_path, content.items);
-    }
-};
-
-const GeneratePreambleStep = struct {
-    const Self = @This();
-
-    step: std.Build.Step,
-    b: *std.Build,
-    read_step: *ReadFileStep,
-    is_darwin: bool,
-    wf: *std.Build.Step.WriteFile,
-    output_path: std.Build.LazyPath,
-    lib: *std.Build.Step.Compile,
-
-    pub fn create(
-        b: *std.Build,
-        read_step: *ReadFileStep,
-        is_darwin: bool,
-        wf: *std.Build.Step.WriteFile,
-        lib: *std.Build.Step.Compile,
-    ) *GeneratePreambleStep {
-        const new = b.allocator.create(Self) catch unreachable;
-
-        new.* = .{
-            .step = std.Build.Step.init(.{
-                .id = .custom,
-                .name = "generate_preamble",
-                .owner = b,
-                .makeFn = make,
-            }),
-            .b = b,
-            .read_step = read_step,
-            .is_darwin = is_darwin,
-            .wf = wf,
-            .output_path = undefined, // Will be set in make()
-            .lib = lib,
-        };
-
-        return new;
-    }
-
-    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
-        _ = prog_node;
-        const self: *Self = @fieldParentPtr("step", step);
-
-        var content = std.ArrayList(u8).init(self.b.allocator);
-        defer content.deinit();
-
-        try content.appendSlice(
-            \\const char* get_kernel_preamble() {
-            \\return R"preamble(
-            \\
-        );
-
-        if (self.is_darwin) {
-            try content.appendSlice(
-                \\#include <cmath>
-                \\#include <complex>
-                \\#include <cstdint>
-                \\#include <vector>
-                \\
-            );
-        }
-
-        try content.appendSlice(self.read_step.contents);
-
-        try content.appendSlice(
-            \\
-            \\using namespace mlx::core;
-            \\using namespace mlx::core::detail;
-            \\)preamble";
-            \\}
-            \\
-        );
-
-        // The output path is now in the .zig_cache, which may or may not be okay
-        self.output_path = self.wf.add("mlx/backend/common/compiled_preamble.cpp", content.items);
-    }
-};
-
-const AddFileStep = struct {
-    const Self = @This();
-
-    step: std.Build.Step,
-    b: *std.Build,
-    gen_step: *GeneratePreambleStep,
-    lib: *std.Build.Step.Compile,
-
-    fn create(b: *std.Build, lib: *std.Build.Step.Compile, gen_step: *GeneratePreambleStep) *Self {
-        const new = b.allocator.create(Self) catch unreachable;
-        new.* = .{
-            .step = std.Build.Step.init(.{
-                .id = .custom,
-                .name = "add_file",
-                .owner = b,
-                .makeFn = make,
-            }),
-            .b = b,
-            .lib = lib,
-            .gen_step = gen_step,
-        };
-        return new;
-    }
-
-    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
-        _ = prog_node;
-        const self: *Self = @fieldParentPtr("step", step);
-
-        const preamble_cpp_file = self.gen_step.output_path;
-        self.lib.addCSourceFile(.{ .file = preamble_cpp_file, .flags = &CPP_FLAGS });
-    }
-};
-
-const AddMetalFileStep = struct {
-    const Self = @This();
-
-    step: std.Build.Step,
-    b: *std.Build,
-    gen_step: *GenerateMetalJitPreambleStep,
-    lib: *std.Build.Step.Compile,
-
-    fn create(b: *std.Build, lib: *std.Build.Step.Compile, gen_step: *GenerateMetalJitPreambleStep) *Self {
-        const new = b.allocator.create(Self) catch unreachable;
-        new.* = .{
-            .step = std.Build.Step.init(.{
-                .id = .custom,
-                .name = "add_file",
-                .owner = b,
-                .makeFn = make,
-            }),
-            .b = b,
-            .lib = lib,
-            .gen_step = gen_step,
-        };
-        return new;
-    }
-
-    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
-        _ = prog_node;
-        const self: *Self = @fieldParentPtr("step", step);
-
-        const preamble_cpp_file = self.gen_step.output_path;
-        self.lib.addCSourceFile(.{ .file = preamble_cpp_file, .flags = &CPP_FLAGS });
-    }
-};
-
 ////////////////////////////
 /// util functions
 ////////////////////////////
@@ -871,6 +741,34 @@ fn checkMacOSSDKVersion() !f32 {
 
     const version = try std.fmt.parseFloat(f32, std.mem.trim(u8, result.stdout, " \n\r"));
     return version;
+}
+
+fn getVersionIncludes(metal_version: u32) []const u8 {
+    return if (metal_version >= 310)
+        "mlx/backend/metal/kernels/metal_3_1"
+    else
+        "mlx/backend/metal/kernels/metal_3_0";
+}
+
+fn determineMetalVersion(allocator: std.mem.Allocator) u32 {
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{
+            "zsh",
+            "-c",
+            "echo \"__METAL_VERSION__\" | xcrun -sdk macosx metal -E -x metal -P - | tail -1",
+        },
+    }) catch |err| {
+        std.debug.panic("Failed to get Metal version: {s}", .{@errorName(err)});
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    const version_str = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
+
+    return std.fmt.parseInt(u32, version_str, 10) catch |err| {
+        std.debug.panic("Failed to parse Metal version '{s}': {s}", .{ version_str, @errorName(err) });
+    };
 }
 
 fn checkMPI() !struct { found: bool, include_path: ?[]const u8 } {
@@ -987,6 +885,72 @@ const metal_sources = [_][]const u8{
     "backend/metal/unary.cpp",
     "backend/metal/resident.cpp",
     "backend/metal/utils.cpp",
+};
+
+const default_kernels = [_][]const u8{
+    "arg_reduce",
+    "conv",
+    "gemv",
+    "layer_norm",
+    "random",
+    "rms_norm",
+    "rope",
+    "scaled_dot_product_attention",
+    "steel/attn/kernels/steel_attention",
+};
+
+const jit_kernels = [_][]const u8{
+    "arange",
+    "binary",
+    "binary_two",
+    "copy",
+    "fft",
+    "reduce",
+    "quantized",
+    "scan",
+    "softmax",
+    "sort",
+    "ternary",
+    "unary",
+    "steel/conv/kernels/steel_conv",
+    "steel/conv/kernels/steel_conv_general",
+    "steel/gemm/kernels/steel_gemm_fused",
+    "steel/gemm/kernels/steel_gemm_masked",
+    "steel/gemm/kernels/steel_gemm_splitk",
+    "gemv_masked",
+};
+
+const default_jit_sources = [_][]const u8{
+    "utils",
+    "unary_ops",
+    "binary_ops",
+    "ternary_ops",
+    "reduce_utils",
+    "scatter",
+    "gather",
+    "hadamard",
+};
+
+const optional_jit_sources = [_][]const u8{
+    "arange",
+    "copy",
+    "unary",
+    "binary",
+    "binary_two",
+    "fft",
+    "ternary",
+    "softmax",
+    "scan",
+    "sort",
+    "reduce",
+    "steel/gemm/gemm",
+    "steel/gemm/kernels/steel_gemm_fused",
+    "steel/gemm/kernels/steel_gemm_masked",
+    "steel/gemm/kernels/steel_gemm_splitk",
+    "steel/conv/kernels/steel_conv",
+    "steel/conv/kernels/steel_conv_general",
+    "quantized",
+    "gemv_masked",
 };
 
 const no_metal_sources = [_][]const u8{
