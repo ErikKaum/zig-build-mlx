@@ -190,6 +190,9 @@ pub fn build(b: *std.Build) !void {
 
         const metal_lib_path_raw = try buildAllKernels(b, og_mlx, options);
         const metal_lib_path = try std.fmt.allocPrint(b.allocator, "\"{s}\"", .{metal_lib_path_raw});
+
+        std.log.info("METAL_PATH: {s}\n", .{metal_lib_path_raw});
+
         lib.defineCMacro("METAL_PATH", metal_lib_path);
 
         if (options.metal_jit) {

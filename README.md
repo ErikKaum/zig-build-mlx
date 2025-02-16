@@ -14,11 +14,11 @@ In the chart this repo is the leftmost in the lower flow. So it's not strickly f
 ## Supported features
 
 - [x] CPU tests
-- [ ] Metal tests
+- [x] Metal tests
 - [ ] Examaples
 - [ ] Benchmarks
 - [ ] Python bindings
-- [ ] Metal
+- [x] Metal
 - [x] Build CPU
 - [ ] Metal debug
 - [ ] Enable x68 Mac
