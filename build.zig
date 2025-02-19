@@ -192,8 +192,8 @@ pub fn build(b: *std.Build) !void {
         lib.addIncludePath(root);
         lib.installHeadersDirectory(root, ".", .{ .include_extensions = &.{".hpp"} });
 
-        // TODO have to figure out how the vision OS thing works:
-        // /Users/erikkaum/.cache/zig/p/1220d24e8ea45a42f1e5b4928f0991cb2d15fb502e602d57c1551cca4f702398e7f0/mlx/backend/metal/device.cpp:28:56
+        // TODO the vision OS part requires the zig version from main, but using that breaks a lot of other things
+        // solution is to migrate the entire build file to 0.14.0-dev
         lib.addCSourceFiles(.{ .root = og_mlx.path("mlx"), .files = &metal_sources, .flags = &CPP_FLAGS });
 
         const formatted_metal_output_path = try std.fmt.allocPrint(b.allocator, "\"{s}/mlx.metallib\"", .{options.metal_output_path});
