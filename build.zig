@@ -16,8 +16,13 @@ const BuildOptions = struct {
     shared_libs: bool,
     install_message: bool,
     version: []const u8,
+    metal_output_path: []const u8,
 
-    fn fromOptions(b: *std.Build) BuildOptions {
+    fn fromOptions(b: *std.Build) !BuildOptions {
+        const default_rel_dir = "lib/metal";
+        const default_path = try std.fmt.allocPrint(b.allocator, "{s}/{s}", .{ b.install_prefix, default_rel_dir });
+        const descprition = try std.fmt.allocPrint(b.allocator, "Absolute path to the metallib. Defaults to {s}", .{default_path});
+
         return .{
             // TODO check these defaults and align with MLX
             .build_tests = b.option(bool, "build-tests", "Build tests for mlx") orelse true,
@@ -34,6 +39,9 @@ const BuildOptions = struct {
             .shared_libs = b.option(bool, "shared-libs", "Build mlx as a shared library") orelse false,
             .install_message = b.option(bool, "install-message", "Show installation messages") orelse false,
             .version = b.option([]const u8, "version", "MLX version") orelse "0.21.0",
+
+            // not used in og MLX but added here to better control the out dir of mlx.metallib (which contains the kernels)
+            .metal_output_path = b.option([]const u8, "metal-output-path", descprition) orelse default_path,
         };
     }
 };
@@ -63,7 +71,7 @@ pub fn build(b: *std.Build) !void {
     // const optimize = b.standardOptimizeOption(.{});
     const optimize = std.builtin.OptimizeMode.ReleaseFast;
 
-    const options = BuildOptions.fromOptions(b);
+    const options = try BuildOptions.fromOptions(b);
     const deps = try Dependencies.init(b, options, target, optimize);
 
     // Original MLX, let's not call it "mlx" since that could be easy to confuse with the mlx lib we're now building
@@ -188,12 +196,11 @@ pub fn build(b: *std.Build) !void {
         // /Users/erikkaum/.cache/zig/p/1220d24e8ea45a42f1e5b4928f0991cb2d15fb502e602d57c1551cca4f702398e7f0/mlx/backend/metal/device.cpp:28:56
         lib.addCSourceFiles(.{ .root = og_mlx.path("mlx"), .files = &metal_sources, .flags = &CPP_FLAGS });
 
-        const metal_lib_path_raw = try buildAllKernels(b, og_mlx, options);
-        const metal_lib_path = try std.fmt.allocPrint(b.allocator, "\"{s}\"", .{metal_lib_path_raw});
+        const formatted_metal_output_path = try std.fmt.allocPrint(b.allocator, "\"{s}/mlx.metallib\"", .{options.metal_output_path});
+        std.log.info("METAL_PATH: {s}", .{formatted_metal_output_path});
+        lib.defineCMacro("METAL_PATH", formatted_metal_output_path);
 
-        std.log.info("METAL_PATH: {s}\n", .{metal_lib_path_raw});
-
-        lib.defineCMacro("METAL_PATH", metal_lib_path);
+        try buildAllKernels(b, lib, og_mlx, options);
 
         if (options.metal_jit) {
             lib.addCSourceFile(.{ .file = og_mlx.path("mlx/backend/metal/jit_kernels.cpp") });
@@ -287,7 +294,7 @@ pub fn build(b: *std.Build) !void {
 /// Everything to build metal kernels
 ///////////////////////////////////////
 
-fn buildAllKernels(b: *std.Build, og_mlx: *std.Build.Dependency, options: BuildOptions) ![]const u8 {
+fn buildAllKernels(b: *std.Build, lib: *std.Build.Step.Compile, og_mlx: *std.Build.Dependency, options: BuildOptions) !void {
     var airFiles = std.ArrayList(std.Build.LazyPath).init(b.allocator);
     defer airFiles.deinit();
 
@@ -303,8 +310,7 @@ fn buildAllKernels(b: *std.Build, og_mlx: *std.Build.Dependency, options: BuildO
     }
 
     // finally build the metallib which depends on all the air files
-    const full_metal_path = try buildMetallib(b, airFiles.items);
-    return full_metal_path;
+    try buildMetallib(b, lib, airFiles.items, options);
 }
 
 // The original MLX uses dependency tracking for file changes, I've chosen to omit this for now
@@ -365,7 +371,7 @@ fn buildKernel(b: *std.Build, comptime rel_path: []const u8, og_mlx: *std.Build.
     return output_path;
 }
 
-fn buildMetallib(b: *std.Build, air_files: []std.Build.LazyPath) ![]const u8 {
+fn buildMetallib(b: *std.Build, lib: *std.Build.Step.Compile, air_files: []std.Build.LazyPath, options: BuildOptions) !void {
     const metallib_cmd = b.addSystemCommand(&[_][]const u8{
         "xcrun",
         "-sdk",
@@ -380,19 +386,53 @@ fn buildMetallib(b: *std.Build, air_files: []std.Build.LazyPath) ![]const u8 {
     metallib_cmd.addArg("-o");
     const metallib_file = metallib_cmd.addOutputFileArg("mlx.metallib");
 
-    // Mimic the CMake install rule: install to the lib directory.
-    const install = b.addInstallFile(metallib_file, "lib/mlx.metallib");
-    install.step.dependOn(&metallib_cmd.step);
-    b.default_step.dependOn(&install.step);
+    const copy_step = CopyMetalLibStep.create(b, metallib_file, options.metal_output_path);
 
-    const full_metal_path = try std.fmt.allocPrint(b.allocator, "{s}/lib/mlx.metallib", .{
-        b.install_prefix,
-    });
-
-    // const full_metal_path = b.dep_prefix ++ "lib/mlx.metallib";
-    // const full_metal_path = b.getInstallPath(install.dir, install.dest_rel_path);
-    return full_metal_path;
+    copy_step.step.dependOn(&metallib_cmd.step);
+    lib.step.dependOn(&copy_step.step);
 }
+
+const CopyMetalLibStep = struct {
+    const Self = @This();
+
+    step: std.Build.Step,
+    b: *std.Build,
+    metallib_file: std.Build.LazyPath,
+    metal_output_path: []const u8,
+
+    pub fn create(b: *std.Build, metallib_file: std.Build.LazyPath, metal_output_path: []const u8) *CopyMetalLibStep {
+        const new = b.allocator.create(Self) catch unreachable;
+        new.* = .{
+            .b = b,
+            .metallib_file = metallib_file,
+            .metal_output_path = metal_output_path,
+            .step = std.Build.Step.init(.{
+                .id = .custom,
+                .name = "copy_mlx_metallib",
+                .owner = b,
+                .makeFn = make,
+            }),
+        };
+        return new;
+    }
+
+    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
+        _ = prog_node;
+
+        const self: *Self = @fieldParentPtr("step", step);
+        const src_path = self.metallib_file.getPath(self.b);
+
+        const dest_file = try std.fmt.allocPrint(self.b.allocator, "{s}/mlx.metallib", .{self.metal_output_path});
+
+        var fs = std.fs.cwd();
+        var dest_dir = fs.makeOpenPath(self.metal_output_path, .{}) catch |err| {
+            return err;
+        };
+        defer dest_dir.close();
+
+        try std.fs.copyFileAbsolute(src_path, dest_file, .{});
+    }
+};
 
 fn build_jit_sources(b: *std.Build, lib: *std.Build.Step.Compile, og_mlx: *std.Build.Dependency, options: BuildOptions) !void {
     inline for (default_jit_sources) |source| {
